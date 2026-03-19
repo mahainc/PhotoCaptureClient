@@ -4,3 +4,7 @@ DerivedData/
 *.xcodeproj/
 *.xcworkspace/
 xcuserdata/
+
+# YOLO model source files (we only commit the compiled .mlmodelc)
+*.mlpackage
+*.pt
