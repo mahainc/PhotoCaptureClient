@@ -47,6 +47,11 @@ public struct PhotoCaptureClient: Sendable {
 
 	public var events: @Sendable () async -> AsyncStream<Event> = { AsyncStream { _ in } }
 
+	// MARK: - Frame Delivery
+
+	/// Stream of pixel buffers from the camera. Used by ObjectDetectionClientLive for inference.
+	public var pixelBufferStream: @Sendable () async -> AsyncStream<PixelBufferWrapper> = { AsyncStream { _ in } }
+
 	// MARK: - Preview
 
 	public var previewLayer: @Sendable () async -> PreviewLayer = { PreviewLayer(layer: CALayer()) }

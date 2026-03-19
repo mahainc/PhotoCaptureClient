@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import CoreVideo
 import CasePaths
 import QuartzCore
 
@@ -135,6 +136,36 @@ extension PhotoCaptureClient {
 
 		public static func == (lhs: PreviewLayer, rhs: PreviewLayer) -> Bool {
 			lhs.layer === rhs.layer
+		}
+	}
+}
+
+// MARK: - PixelBufferWrapper
+
+extension PhotoCaptureClient {
+	/// A Sendable wrapper around CVPixelBuffer for crossing isolation boundaries.
+	/// CVPixelBuffer is not Sendable, so this wrapper retains it and exposes metadata.
+	/// Follows the same pattern as `PreviewLayer`.
+	public final class PixelBufferWrapper: @unchecked Sendable {
+		/// The underlying pixel buffer. Retained for the lifetime of this wrapper.
+		public let pixelBuffer: CVPixelBuffer
+		public let width: Int
+		public let height: Int
+		public let bytesPerRow: Int
+		public let timestamp: Date
+
+		public init(
+			pixelBuffer: CVPixelBuffer,
+			width: Int,
+			height: Int,
+			bytesPerRow: Int,
+			timestamp: Date = .now
+		) {
+			self.pixelBuffer = pixelBuffer
+			self.width = width
+			self.height = height
+			self.bytesPerRow = bytesPerRow
+			self.timestamp = timestamp
 		}
 	}
 }

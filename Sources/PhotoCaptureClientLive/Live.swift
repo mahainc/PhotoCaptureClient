@@ -36,6 +36,7 @@ extension PhotoCaptureClient: DependencyKey {
 			events: {
 				await actor.observeEvents()
 			},
+			pixelBufferStream: { AsyncStream { _ in } },
 			previewLayer: {
 				await actor.getPreviewLayer()
 			}

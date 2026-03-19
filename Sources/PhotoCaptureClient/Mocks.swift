@@ -41,6 +41,7 @@ extension PhotoCaptureClient {
 		requestAuthorization: { .authorized },
 		authorizationStatus: { .authorized },
 		events: { AsyncStream { _ in } },
+		pixelBufferStream: { AsyncStream { _ in } },
 		previewLayer: { PreviewLayer(layer: CALayer()) }
 	)
 
@@ -75,6 +76,7 @@ extension PhotoCaptureClient {
 				}
 			}
 		},
+		pixelBufferStream: { AsyncStream { _ in } },
 		previewLayer: { PreviewLayer(layer: CALayer()) }
 	)
 
@@ -108,6 +110,7 @@ extension PhotoCaptureClient {
 				}
 			}
 		},
+		pixelBufferStream: { AsyncStream { _ in } },
 		previewLayer: { PreviewLayer(layer: CALayer()) }
 	)
 }
