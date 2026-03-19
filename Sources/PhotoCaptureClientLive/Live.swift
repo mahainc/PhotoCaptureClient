@@ -39,8 +39,11 @@ extension PhotoCaptureClient: DependencyKey {
 			pixelBufferStream: {
 				await actor.observePixelBuffers()
 			},
-			previewLayer: {
-				await actor.getPreviewLayer()
+			previewView: {
+				await actor.getPreviewView()
+			},
+			updateOverlays: { overlays in
+				Task { await actor.updateOverlays(overlays) }
 			}
 		)
 	}()
