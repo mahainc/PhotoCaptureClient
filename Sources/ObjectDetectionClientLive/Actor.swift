@@ -172,12 +172,12 @@ actor ObjectDetectionClientActor {
 				let start = CFAbsoluteTimeGetCurrent()
 
 				#if canImport(UIKit)
-				let ciImage = CIImage(cvPixelBuffer: wrapper.pixelBuffer)
-
 				let request = VNCoreMLRequest(model: vnModel)
+
 				request.imageCropAndScaleOption = .scaleFill
 
-				let handler = VNImageRequestHandler(ciImage: ciImage, options: [:])
+				// Use CVPixelBuffer directly — avoids CIImage allocation per frame
+				let handler = VNImageRequestHandler(cvPixelBuffer: wrapper.pixelBuffer, options: [:])
 				do {
 					try handler.perform([request])
 				} catch {

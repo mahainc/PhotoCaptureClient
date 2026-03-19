@@ -38,8 +38,9 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 		set { _pixelBufferContinuation.withLock { $0 = newValue } }
 	}
 
-	// Throttling: only deliver a frame every 200ms (~5fps)
-	private let frameIntervalSeconds: CFTimeInterval = 0.2
+	// Throttling: only deliver a frame every 333ms (~3fps) for YOLO inference.
+	// 3fps is visually smooth for detection boxes while reducing ~40% inference CPU.
+	private let frameIntervalSeconds: CFTimeInterval = 0.333
 	private var lastFrameTime: CFTimeInterval = 0
 
 	// Metal renderer callback — receives every frame at full camera rate (no throttling)
