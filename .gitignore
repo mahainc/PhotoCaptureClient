@@ -5,6 +5,7 @@ DerivedData/
 *.xcworkspace/
 xcuserdata/
 
-# YOLO model source files (we only commit the compiled .mlmodelc)
-*.mlpackage
+# YOLO model source files (only the bundled .mlpackage in Resources/ is committed)
 *.pt
+# Root-level mlpackage files from export (not the bundled one)
+/yolo*.mlpackage
