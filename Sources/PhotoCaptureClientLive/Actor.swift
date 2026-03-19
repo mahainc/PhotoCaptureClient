@@ -7,6 +7,8 @@ import os
 #if os(iOS)
 import UIKit
 import MetalKit
+#else
+import AppKit
 #endif
 
 // MARK: - Delegate

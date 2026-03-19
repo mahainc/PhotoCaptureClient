@@ -53,7 +53,7 @@ let package = Package(
             name: "ObjectDetectionClientLive",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
-                .product(name: "YOLO", package: "yolo-ios-app"),
+                .product(name: "YOLO", package: "yolo-ios-app", condition: .when(platforms: [.iOS])),
                 "ObjectDetectionClient",
                 "PhotoCaptureClient",
             ],
