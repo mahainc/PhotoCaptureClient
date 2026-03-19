@@ -34,6 +34,13 @@ let package = Package(
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 "PhotoCaptureClient"
+            ],
+            resources: [
+                .process("Shaders.metal"),
+            ],
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
             ]
         ),
         .target(
