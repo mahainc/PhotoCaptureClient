@@ -54,7 +54,7 @@ actor ObjectDetectionClientActor {
 	/// MLIR pass manager crashes that occur with .all on certain devices.
 	private func loadModel(from modelURL: URL) throws -> (VNCoreMLModel, [String]) {
 		let config = MLModelConfiguration()
-		config.computeUnits = .cpuOnly
+		config.computeUnits = .cpuAndGPU
 
 		let mlModel: MLModel
 		if modelURL.pathExtension == "mlmodelc" {
