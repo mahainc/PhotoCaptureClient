@@ -8,9 +8,10 @@ import UIKit
 #endif
 
 /// Actor that manages YOLO model lifecycle and runs inference on camera frames.
-/// The model is loaded from the .mlpackage bundled in this SPM target's resources.
+/// Uses BasePredictor directly (instead of YOLO.init) to support .mlmodelc bundles
+/// that Xcode compiles from .mlpackage during the build.
 actor ObjectDetectionClientActor {
-	private var model: YOLO?
+	private var predictor: BasePredictor?
 	private var configuration: ObjectDetectionClient.Configuration?
 	private var resultContinuations: [UUID: AsyncStream<ObjectDetectionClient.DetectionResult>.Continuation] = [:]
 	private var frameProcessingTask: Task<Void, Never>?
@@ -52,6 +53,22 @@ actor ObjectDetectionClientActor {
 		?? Bundle.module.url(forResource: name, withExtension: "mlpackage")
 	}
 
+	/// Load a BasePredictor from a model URL. Handles both .mlmodelc and .mlpackage.
+	/// Uses BasePredictor.create directly instead of YOLO.init, which only accepts
+	/// .mlmodel/.mlpackage paths and fails on .mlmodelc.
+	private func loadPredictor(from modelURL: URL) async throws -> BasePredictor {
+		try await withCheckedThrowingContinuation { continuation in
+			BasePredictor.create(unwrappedModelURL: modelURL) { result in
+				switch result {
+				case .success(let predictor):
+					continuation.resume(returning: predictor)
+				case .failure(let error):
+					continuation.resume(throwing: error)
+				}
+			}
+		}
+	}
+
 	// MARK: - Start / Stop
 
 	func startDetection(
@@ -68,31 +85,21 @@ actor ObjectDetectionClientActor {
 
 		guard let modelURL = bundledModelURL(name: configuration.modelName) else {
 			throw ObjectDetectionClient.Error.modelLoadFailed(
-				"Bundled model '\(configuration.modelName).mlpackage' not found in resources"
+				"Bundled model '\(configuration.modelName)' not found in resources (tried .mlmodelc and .mlpackage)"
 			)
 		}
 
-		// YOLO init requires file path ending in .mlpackage and a task parameter.
-		// Loading is asynchronous — the completion callback signals success/failure.
-		let yolo = await withCheckedContinuation { (continuation: CheckedContinuation<YOLO?, Never>) in
-			let instance = YOLO(modelURL.path, task: .detect) { result in
-				switch result {
-				case .success(let model):
-					continuation.resume(returning: model)
-				case .failure:
-					continuation.resume(returning: nil)
-				}
-			}
-			// Keep reference alive until completion fires.
-			_ = instance
-		}
+		logger("Found model at: \(modelURL.path) (extension: \(modelURL.pathExtension))")
 
-		guard let yolo else {
-			throw ObjectDetectionClient.Error.modelLoadFailed("YOLO model initialization failed")
+		do {
+			let loadedPredictor = try await loadPredictor(from: modelURL)
+			self.predictor = loadedPredictor
+			logger("YOLO model loaded successfully from: \(modelURL.lastPathComponent)")
+		} catch {
+			throw ObjectDetectionClient.Error.modelLoadFailed(
+				"BasePredictor.create failed: \(error.localizedDescription)"
+			)
 		}
-
-		self.model = yolo
-		logger("YOLO model loaded from bundle: \(modelURL.path)")
 
 		modeStorage.withLock { $0 = .auto }
 
@@ -111,7 +118,7 @@ actor ObjectDetectionClientActor {
 		frameProcessingTask?.cancel()
 		frameProcessingTask = nil
 		modeStorage.withLock { $0 = .manual }
-		model = nil
+		predictor = nil
 		configuration = nil
 
 		for continuation in resultContinuations.values {
@@ -123,7 +130,7 @@ actor ObjectDetectionClientActor {
 	// MARK: - Frame Processing
 
 	private func processFrame(_ wrapper: PhotoCaptureClient.PixelBufferWrapper) async {
-		guard let model else { return }
+		guard let predictor else { return }
 		guard let configuration else { return }
 
 		let result: ObjectDetectionClient.DetectionResult? = await withCheckedContinuation { continuation in
@@ -134,8 +141,8 @@ actor ObjectDetectionClientActor {
 				// CIImage from retained CVPixelBuffer — zero copy
 				let ciImage = CIImage(cvPixelBuffer: wrapper.pixelBuffer)
 
-				// YOLO callAsFunction is NON-THROWING, returns empty result on failure
-				let yoloResult = model(ciImage)
+				// BasePredictor.predictOnImage is NON-THROWING, returns empty result on failure
+				let yoloResult = predictor.predictOnImage(image: ciImage)
 				let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
 
 				var detectedObjects: [ObjectDetectionClient.DetectedObject] = []
@@ -179,42 +186,29 @@ actor ObjectDetectionClientActor {
 
 	func detectInImage(_ imageData: Data) async throws -> ObjectDetectionClient.DetectionResult {
 		#if canImport(UIKit)
-		let yolo: YOLO
-		if let existingModel = model {
-			yolo = existingModel
+		let activePredictor: BasePredictor
+		if let existing = predictor {
+			activePredictor = existing
 		} else {
 			let modelName = configuration?.modelName ?? "yolo11n"
 			guard let modelURL = bundledModelURL(name: modelName) else {
 				throw ObjectDetectionClient.Error.modelLoadFailed(
-					"Bundled model '\(modelName).mlpackage' not found in resources"
+					"Bundled model '\(modelName)' not found in resources"
 				)
 			}
-
-			// Load model via completion for single-image detection
-			let loaded = await withCheckedContinuation { (continuation: CheckedContinuation<YOLO?, Never>) in
-				let instance = YOLO(modelURL.path, task: .detect) { result in
-					switch result {
-					case .success(let model):
-						continuation.resume(returning: model)
-					case .failure:
-						continuation.resume(returning: nil)
-					}
-				}
-				_ = instance
-			}
-
-			guard let loaded else {
-				throw ObjectDetectionClient.Error.modelLoadFailed("YOLO model initialization failed for single-image detection")
-			}
-			yolo = loaded
+			activePredictor = try await loadPredictor(from: modelURL)
 		}
 
 		guard let uiImage = UIImage(data: imageData) else {
 			throw ObjectDetectionClient.Error.inferenceFailed("Invalid image data")
 		}
 
+		guard let ciImage = CIImage(image: uiImage) else {
+			throw ObjectDetectionClient.Error.inferenceFailed("Failed to create CIImage from UIImage")
+		}
+
 		let start = CFAbsoluteTimeGetCurrent()
-		let yoloResult = yolo(uiImage)
+		let yoloResult = activePredictor.predictOnImage(image: ciImage)
 		let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
 		let config = configuration ?? .default
 
