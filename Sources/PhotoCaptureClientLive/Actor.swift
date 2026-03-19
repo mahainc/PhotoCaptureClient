@@ -4,6 +4,11 @@ import PhotoCaptureClient
 import Foundation
 import os
 
+#if os(iOS)
+import UIKit
+import MetalKit
+#endif
+
 // MARK: - Delegate
 
 /// Private delegate class that bridges AVCapturePhotoCaptureDelegate callbacks
@@ -35,12 +40,14 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 	private let frameIntervalSeconds: CFTimeInterval = 0.2
 	private var lastFrameTime: CFTimeInterval = 0
 
+	// Metal renderer callback — receives every frame at full camera rate (no throttling)
+	var onFrame: ((_ pixelBuffer: CVPixelBuffer) -> Void)?
+
 	// Framework objects — owned by the delegate, never by the actor
 	private(set) var captureSession: AVCaptureSession?
 	private(set) var photoOutput: AVCapturePhotoOutput?
 	private(set) var currentDevice: AVCaptureDevice?
 	private(set) var currentInput: AVCaptureDeviceInput?
-	private(set) var videoPreviewLayer: AVCaptureVideoPreviewLayer?
 	private let sessionQueue = DispatchQueue(label: "PhotoCaptureDelegate.sessionQueue")
 
 	var isRunning: Bool {
@@ -85,6 +92,9 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 		let videoOutput = AVCaptureVideoDataOutput()
 		videoOutput.setSampleBufferDelegate(self, queue: videoDataQueue)
 		videoOutput.alwaysDiscardsLateVideoFrames = true
+		videoOutput.videoSettings = [
+			kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+		]
 		if session.canAddOutput(videoOutput) {
 			session.addOutput(videoOutput)
 			self.videoDataOutput = videoOutput
@@ -96,15 +106,10 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 
 		session.commitConfiguration()
 
-		// Create preview layer
-		let preview = AVCaptureVideoPreviewLayer(session: session)
-		preview.videoGravity = .resizeAspectFill
-
 		self.captureSession = session
 		self.photoOutput = output
 		self.currentDevice = device
 		self.currentInput = input
-		self.videoPreviewLayer = preview
 	}
 
 	func startRunning() {
@@ -203,11 +208,11 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 		pixelBufferContinuation?.finish()
 		pixelBufferContinuation = nil
 		videoDataOutput = nil
+		onFrame = nil
 		captureSession = nil
 		photoOutput = nil
 		currentDevice = nil
 		currentInput = nil
-		videoPreviewLayer = nil
 	}
 
 	// MARK: - Notification Observers
@@ -343,12 +348,15 @@ extension PhotoCaptureDelegate: AVCaptureVideoDataOutputSampleBufferDelegate {
 		didOutput sampleBuffer: CMSampleBuffer,
 		from connection: AVCaptureConnection
 	) {
-		// Throttle: skip frames if we're delivering too fast
+		guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+		// Deliver every frame to Metal renderer at full camera rate
+		onFrame?(pixelBuffer)
+
+		// Throttle: only deliver frames for detection inference at ~5fps
 		let now = CACurrentMediaTime()
 		guard now - lastFrameTime >= frameIntervalSeconds else { return }
 		lastFrameTime = now
-
-		guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
 		let width = CVPixelBufferGetWidth(pixelBuffer)
 		let height = CVPixelBufferGetHeight(pixelBuffer)
@@ -362,7 +370,6 @@ extension PhotoCaptureDelegate: AVCaptureVideoDataOutputSampleBufferDelegate {
 			timestamp: .now
 		)
 
-		// Yield directly into the continuation — no actor hop needed
 		pixelBufferContinuation?.yield(wrapper)
 	}
 }
@@ -376,6 +383,9 @@ actor PhotoCaptureClientActor {
 
 	private var currentPosition: PhotoCaptureClient.CameraPosition = .back
 	private var currentFlashMode: PhotoCaptureClient.FlashMode = .auto
+	#if os(iOS)
+	private var metalRenderer: MetalPreviewRenderer?
+	#endif
 	private var eventContinuations: [UUID: AsyncStream<PhotoCaptureClient.Event>.Continuation] = [:]
 
 	// MARK: - Init
@@ -410,6 +420,13 @@ actor PhotoCaptureClientActor {
 		logger("Configuring capture session")
 		try delegate.configureSession(position: currentPosition)
 		delegate.registerNotificationObservers()
+		#if os(iOS)
+		let renderer = await MainActor.run { MetalPreviewRenderer() }
+		self.metalRenderer = renderer
+		delegate.onFrame = { [weak renderer] pixelBuffer in
+			renderer?.enqueueFrame(pixelBuffer)
+		}
+		#endif
 		logger("Starting capture session")
 		delegate.startRunning()
 	}
@@ -422,6 +439,10 @@ actor PhotoCaptureClientActor {
 		logger("Stopping capture session")
 		delegate.pixelBufferContinuation?.finish()
 		delegate.pixelBufferContinuation = nil
+		#if os(iOS)
+		delegate.onFrame = nil
+		metalRenderer = nil
+		#endif
 		delegate.teardown()
 		for continuation in eventContinuations.values {
 			continuation.finish()
@@ -512,12 +533,24 @@ actor PhotoCaptureClientActor {
 
 	// MARK: - Preview
 
-	func getPreviewLayer() -> PhotoCaptureClient.PreviewLayer {
-		if let layer = delegate.videoPreviewLayer {
-			return PhotoCaptureClient.PreviewLayer(layer: layer)
+	#if os(iOS)
+	func getPreviewView() -> PhotoCaptureClient.PreviewView {
+		if let renderer = metalRenderer {
+			return PhotoCaptureClient.PreviewView(view: renderer)
 		}
-		return PhotoCaptureClient.PreviewLayer(layer: CALayer())
+		return PhotoCaptureClient.PreviewView(view: UIView())
 	}
+
+	func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {
+		metalRenderer?.updateOverlays(overlays)
+	}
+	#else
+	func getPreviewView() -> PhotoCaptureClient.PreviewView {
+		return PhotoCaptureClient.PreviewView(view: NSView())
+	}
+
+	func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {}
+	#endif
 
 	// MARK: - Helpers
 
