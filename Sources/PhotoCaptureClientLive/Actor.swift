@@ -2,6 +2,7 @@
 import CoreMedia
 import PhotoCaptureClient
 import Foundation
+import os
 
 // MARK: - Delegate
 
@@ -21,8 +22,14 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 	private(set) var videoDataOutput: AVCaptureVideoDataOutput?
 	private let videoDataQueue = DispatchQueue(label: "PhotoCaptureDelegate.videoDataQueue")
 
-	// Direct continuation for frame delivery — avoids actor hop per frame
-	var pixelBufferContinuation: AsyncStream<PhotoCaptureClient.PixelBufferWrapper>.Continuation?
+	// Thread-safe continuation for frame delivery.
+	// Written from actor context (observePixelBuffers), read from videoDataQueue (captureOutput).
+	private let _pixelBufferContinuation = OSAllocatedUnfairLock<AsyncStream<PhotoCaptureClient.PixelBufferWrapper>.Continuation?>(initialState: nil)
+
+	var pixelBufferContinuation: AsyncStream<PhotoCaptureClient.PixelBufferWrapper>.Continuation? {
+		get { _pixelBufferContinuation.withLock { $0 } }
+		set { _pixelBufferContinuation.withLock { $0 = newValue } }
+	}
 
 	// Throttling: only deliver a frame every 200ms (~5fps)
 	private let frameIntervalSeconds: CFTimeInterval = 0.2
@@ -81,6 +88,10 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 		if session.canAddOutput(videoOutput) {
 			session.addOutput(videoOutput)
 			self.videoDataOutput = videoOutput
+			// Rotate frames to portrait so YOLO bounding boxes are in portrait coordinates
+			if let connection = videoOutput.connection(with: .video) {
+				connection.videoRotationAngle = 90
+			}
 		}
 
 		session.commitConfiguration()
