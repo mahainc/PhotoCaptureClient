@@ -1,7 +1,7 @@
 #if os(iOS)
 import UIKit
-import MetalKit
-import AVFoundation
+@preconcurrency import MetalKit
+@preconcurrency import AVFoundation
 import PhotoCaptureClient
 import os
 
@@ -19,6 +19,12 @@ private struct AspectFillUniforms {
 private struct BoxVertex {
 	var position: SIMD2<Float>
 	var color: SIMD4<Float>
+}
+
+/// Wrapper to make CVMetalTexture + MTLTexture pair Sendable for use in OSAllocatedUnfairLock.
+private struct CameraFrame: @unchecked Sendable {
+	let cvTexture: CVMetalTexture
+	let mtlTexture: MTLTexture
 }
 
 /// Metal-backed camera preview that renders CVPixelBuffers using the display link
@@ -46,7 +52,7 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 	/// Latest camera frame — stores both CVMetalTexture (to retain backing IOSurface) and MTLTexture (for rendering).
 	/// CVMetalTextureGetTexture returns a texture only valid while the CVMetalTexture is alive,
 	/// so we must retain the CVMetalTexture until the next frame replaces it.
-	private let _currentFrame = OSAllocatedUnfairLock<(cv: CVMetalTexture, mtl: MTLTexture)?>(initialState: nil)
+	private let _currentFrame = OSAllocatedUnfairLock<CameraFrame?>(initialState: nil)
 
 	/// Texture dimensions for aspect-fill computation.
 	private let _textureSize = OSAllocatedUnfairLock<SIMD2<Float>>(initialState: .zero)
@@ -63,16 +69,13 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 
 	// MARK: - Init
 
-	init?() {
-		guard let device = MTLCreateSystemDefaultDevice() else {
+	/// Factory method — returns nil if Metal is unavailable.
+	static func create() -> MetalPreviewRenderer? {
+		guard let device = MTLCreateSystemDefaultDevice(),
+			  let commandQueue = device.makeCommandQueue() else {
 			return nil
 		}
 
-		guard let commandQueue = device.makeCommandQueue() else {
-			return nil
-		}
-
-		// Create texture cache for zero-copy CVPixelBuffer → MTLTexture
 		var cache: CVMetalTextureCache?
 		let status = CVMetalTextureCacheCreate(
 			kCFAllocatorDefault, nil, device, nil, &cache
@@ -81,21 +84,6 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 			return nil
 		}
 
-		self.device = device
-		self.commandQueue = commandQueue
-		self.textureCache = textureCache
-
-		// Create MTKView — display-link driven rendering on main thread
-		let mtkView = MTKView()
-		mtkView.device = device
-		mtkView.framebufferOnly = true
-		mtkView.colorPixelFormat = .bgra8Unorm
-		mtkView.isPaused = false
-		mtkView.enableSetNeedsDisplay = false
-		mtkView.preferredFramesPerSecond = 60
-		self.mtkView = mtkView
-
-		// Build render pipelines from compiled Metal library
 		guard let library = try? device.makeDefaultLibrary(bundle: Bundle.module) else {
 			return nil
 		}
@@ -123,15 +111,44 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 			return nil
 		}
 
-		// Pre-allocate reusable vertex buffer for bounding box overlays
-		let bufferSize = maxBoxVertices * MemoryLayout<BoxVertex>.stride
+		let bufferSize = 800 * MemoryLayout<BoxVertex>.stride
 		guard let boxVertexBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
 			return nil
 		}
 
+		return MetalPreviewRenderer(
+			device: device,
+			commandQueue: commandQueue,
+			textureCache: textureCache,
+			cameraPipeline: cameraPipeline,
+			boxPipeline: boxPipeline,
+			boxVertexBuffer: boxVertexBuffer
+		)
+	}
+
+	private init(
+		device: MTLDevice,
+		commandQueue: MTLCommandQueue,
+		textureCache: CVMetalTextureCache,
+		cameraPipeline: MTLRenderPipelineState,
+		boxPipeline: MTLRenderPipelineState,
+		boxVertexBuffer: MTLBuffer
+	) {
+		self.device = device
+		self.commandQueue = commandQueue
+		self.textureCache = textureCache
 		self.cameraPipeline = cameraPipeline
 		self.boxPipeline = boxPipeline
 		self.boxVertexBuffer = boxVertexBuffer
+
+		let mtkView = MTKView()
+		mtkView.device = device
+		mtkView.framebufferOnly = true
+		mtkView.colorPixelFormat = .bgra8Unorm
+		mtkView.isPaused = false
+		mtkView.enableSetNeedsDisplay = false
+		mtkView.preferredFramesPerSecond = 60
+		self.mtkView = mtkView
 
 		super.init(frame: .zero)
 
@@ -145,7 +162,6 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 			mtkView.trailingAnchor.constraint(equalTo: trailingAnchor),
 		])
 
-		// Flush texture cache on memory warning
 		NotificationCenter.default.addObserver(
 			forName: UIApplication.didReceiveMemoryWarningNotification,
 			object: nil,
@@ -194,7 +210,7 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 		}
 
 		// Retain CVMetalTexture alongside MTLTexture to keep backing IOSurface alive until next frame
-		_currentFrame.withLock { $0 = (cv: cvTex, mtl: texture) }
+		_currentFrame.withLock { $0 = CameraFrame(cvTexture: cvTex, mtlTexture: texture) }
 		_textureSize.withLock { $0 = SIMD2<Float>(Float(width), Float(height)) }
 	}
 
@@ -267,7 +283,7 @@ extension MetalPreviewRenderer: MTKViewDelegate {
 		encoder.setRenderPipelineState(cameraPipeline)
 		var uniforms = aspectFillUniforms
 		encoder.setVertexBytes(&uniforms, length: MemoryLayout<AspectFillUniforms>.size, index: 0)
-		encoder.setFragmentTexture(frame.mtl, index: 0)
+		encoder.setFragmentTexture(frame.mtlTexture, index: 0)
 		encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
 		// 2. Draw bounding box overlays

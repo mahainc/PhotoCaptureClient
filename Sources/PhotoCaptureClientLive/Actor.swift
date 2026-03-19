@@ -423,7 +423,7 @@ actor PhotoCaptureClientActor {
 		try delegate.configureSession(position: currentPosition)
 		delegate.registerNotificationObservers()
 		#if os(iOS)
-		let renderer = await MainActor.run { MetalPreviewRenderer() }
+		let renderer = await MainActor.run { MetalPreviewRenderer.create() }
 		self.metalRenderer = renderer
 		delegate.onFrame = { [weak renderer] pixelBuffer in
 			renderer?.enqueueFrame(pixelBuffer)
