@@ -1,6 +1,10 @@
 import DependenciesMacros
 import Foundation
-import QuartzCore
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 /// A dependency client wrapping AVFoundation's photo capture APIs for use with TCA.
 ///
@@ -54,5 +58,19 @@ public struct PhotoCaptureClient: Sendable {
 
 	// MARK: - Preview
 
-	public var previewLayer: @Sendable () async -> PreviewLayer = { PreviewLayer(layer: CALayer()) }
+	public var previewView: @Sendable () async -> PreviewView = {
+		await MainActor.run {
+			#if os(iOS)
+			PreviewView(view: UIView())
+			#else
+			PreviewView(view: NSView())
+			#endif
+		}
+	}
+
+	// MARK: - Overlay
+
+	/// Update bounding box overlays on the Metal preview. Pass empty array to clear.
+	/// Note: Updates are best-effort ordered (acceptable since each call fully replaces all overlays).
+	public var updateOverlays: @Sendable (_ overlays: [OverlayRect]) -> Void = { _ in }
 }

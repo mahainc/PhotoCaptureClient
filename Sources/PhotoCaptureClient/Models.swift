@@ -3,6 +3,12 @@ import CoreGraphics
 import CoreVideo
 import CasePaths
 import QuartzCore
+import simd
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 // MARK: - Photo
 
@@ -122,20 +128,30 @@ extension PhotoCaptureClient {
 	}
 }
 
-// MARK: - PreviewLayer
+// MARK: - PreviewView
 
 extension PhotoCaptureClient {
-	/// A Sendable wrapper around AVCaptureVideoPreviewLayer (a CALayer subclass).
-	/// CALayer is not Sendable, so this wrapper enables crossing isolation boundaries.
-	public final class PreviewLayer: @unchecked Sendable, Equatable {
-		public let layer: CALayer
+	/// A Sendable wrapper around a UIView (Metal-backed camera preview).
+	/// UIView is not Sendable, so this wrapper enables crossing isolation boundaries.
+	public final class PreviewView: @unchecked Sendable, Equatable {
+		#if os(iOS)
+		public let view: UIView
+		#else
+		public let view: NSView
+		#endif
 
-		public init(layer: CALayer) {
-			self.layer = layer
+		#if os(iOS)
+		public init(view: UIView) {
+			self.view = view
 		}
+		#else
+		public init(view: NSView) {
+			self.view = view
+		}
+		#endif
 
-		public static func == (lhs: PreviewLayer, rhs: PreviewLayer) -> Bool {
-			lhs.layer === rhs.layer
+		public static func == (lhs: PreviewView, rhs: PreviewView) -> Bool {
+			lhs.view === rhs.view
 		}
 	}
 }
@@ -166,6 +182,40 @@ extension PhotoCaptureClient {
 			self.height = height
 			self.bytesPerRow = bytesPerRow
 			self.timestamp = timestamp
+		}
+	}
+}
+
+// MARK: - OverlayRect
+
+extension PhotoCaptureClient {
+	/// A normalized overlay rectangle for drawing on the Metal preview.
+	/// Coordinates are in 0.0-1.0 space (top-left origin).
+	public struct OverlayRect: Sendable, Equatable {
+		public let x: Float
+		public let y: Float
+		public let width: Float
+		public let height: Float
+		public let label: String?
+		public let confidence: Float?
+		public let color: SIMD4<Float>
+
+		public init(
+			x: Float,
+			y: Float,
+			width: Float,
+			height: Float,
+			label: String? = nil,
+			confidence: Float? = nil,
+			color: SIMD4<Float> = SIMD4<Float>(0, 1, 0, 1)
+		) {
+			self.x = x
+			self.y = y
+			self.width = width
+			self.height = height
+			self.label = label
+			self.confidence = confidence
+			self.color = color
 		}
 	}
 }
