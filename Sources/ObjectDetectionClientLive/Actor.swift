@@ -58,7 +58,7 @@ actor ObjectDetectionClientActor {
 	/// .mlmodel/.mlpackage paths and fails on .mlmodelc.
 	private func loadPredictor(from modelURL: URL) async throws -> BasePredictor {
 		try await withCheckedThrowingContinuation { continuation in
-			BasePredictor.create(unwrappedModelURL: modelURL) { result in
+			ObjectDetector.create(unwrappedModelURL: modelURL) { result in
 				switch result {
 				case .success(let predictor):
 					continuation.resume(returning: predictor)
