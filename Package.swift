@@ -9,10 +9,16 @@ let package = Package(
     products: [
         .singleTargetLibrary("PhotoCaptureClient"),
         .singleTargetLibrary("PhotoCaptureClientLive"),
+        .singleTargetLibrary("ObjectDetectionClient"),
+        .singleTargetLibrary("ObjectDetectionClientLive"),
     ],
     dependencies: [
         .package(
             url: "https://github.com/pointfreeco/swift-composable-architecture.git",
+            branch: "main"
+        ),
+        .package(
+            url: "https://github.com/ultralytics/yolo-ios-app.git",
             branch: "main"
         ),
     ],
@@ -30,10 +36,34 @@ let package = Package(
                 "PhotoCaptureClient"
             ]
         ),
+        .target(
+            name: "ObjectDetectionClient",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+            ]
+        ),
+        .target(
+            name: "ObjectDetectionClientLive",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "YOLO", package: "yolo-ios-app"),
+                "ObjectDetectionClient",
+                "PhotoCaptureClient",
+            ],
+            resources: [
+                .copy("Resources/yolo11n.mlmodelc"),
+            ]
+        ),
         .testTarget(
             name: "PhotoCaptureClientTests",
             dependencies: [
                 "PhotoCaptureClient",
+            ]
+        ),
+        .testTarget(
+            name: "ObjectDetectionClientTests",
+            dependencies: [
+                "ObjectDetectionClient",
             ]
         ),
     ]
