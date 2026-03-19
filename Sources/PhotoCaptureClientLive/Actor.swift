@@ -106,6 +106,14 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 			}
 		}
 
+		// Cap camera frame delivery to 30fps to reduce CPU load.
+		// The Metal renderer draws on-demand per frame, so 30fps is sufficient for preview.
+		if let _ = try? device.lockForConfiguration() {
+			device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+			device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+			device.unlockForConfiguration()
+		}
+
 		session.commitConfiguration()
 
 		self.captureSession = session

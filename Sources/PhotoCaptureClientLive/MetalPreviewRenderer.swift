@@ -60,6 +60,9 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 	/// Current overlay rectangles — written from any thread, read from main thread.
 	private let _overlays = OSAllocatedUnfairLock<[PhotoCaptureClient.OverlayRect]>(initialState: [])
 
+	/// Dirty flag — set by enqueueFrame, cleared by draw. Prevents redundant draws.
+	private let _needsDraw = OSAllocatedUnfairLock<Bool>(initialState: false)
+
 	/// Aspect-fill uniforms — recomputed when drawable size or texture size changes.
 	private var aspectFillUniforms = AspectFillUniforms(
 		uvScale: SIMD2<Float>(1, 1),
@@ -145,9 +148,9 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 		mtkView.device = device
 		mtkView.framebufferOnly = true
 		mtkView.colorPixelFormat = .bgra8Unorm
-		mtkView.isPaused = false
-		mtkView.enableSetNeedsDisplay = false
-		mtkView.preferredFramesPerSecond = 60
+		// On-demand rendering: only draw when a new frame arrives via setNeedsDisplay()
+		mtkView.isPaused = true
+		mtkView.enableSetNeedsDisplay = true
 		self.mtkView = mtkView
 
 		super.init(frame: .zero)
@@ -212,6 +215,12 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 		// Retain CVMetalTexture alongside MTLTexture to keep backing IOSurface alive until next frame
 		_currentFrame.withLock { $0 = CameraFrame(cvTexture: cvTex, mtlTexture: texture) }
 		_textureSize.withLock { $0 = SIMD2<Float>(Float(width), Float(height)) }
+		_needsDraw.withLock { $0 = true }
+
+		// Request a draw on the main thread (MTKView requires main-thread display calls)
+		DispatchQueue.main.async { [weak self] in
+			self?.mtkView.setNeedsDisplay()
+		}
 	}
 
 	/// Update the bounding box overlays displayed on the preview.
@@ -257,6 +266,14 @@ extension MetalPreviewRenderer: MTKViewDelegate {
 	}
 
 	func draw(in view: MTKView) {
+		// Skip if no new frame since last draw
+		let needsDraw = _needsDraw.withLock { val in
+			let current = val
+			val = false
+			return current
+		}
+		guard needsDraw else { return }
+
 		guard let frame = _currentFrame.withLock({ $0 }),
 			  let drawable = view.currentDrawable,
 			  let passDescriptor = view.currentRenderPassDescriptor else {
