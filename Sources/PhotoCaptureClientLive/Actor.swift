@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import CoreMedia
 import PhotoCaptureClient
 import Foundation
 
@@ -15,6 +16,17 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 
 	// Per-capture continuation — set before each capturePhoto call
 	var photoContinuation: CheckedContinuation<PhotoCaptureClient.Photo, any Swift.Error>?
+
+	// Frame delivery properties
+	private(set) var videoDataOutput: AVCaptureVideoDataOutput?
+	private let videoDataQueue = DispatchQueue(label: "PhotoCaptureDelegate.videoDataQueue")
+
+	// Direct continuation for frame delivery — avoids actor hop per frame
+	var pixelBufferContinuation: AsyncStream<PhotoCaptureClient.PixelBufferWrapper>.Continuation?
+
+	// Throttling: only deliver a frame every 200ms (~5fps)
+	private let frameIntervalSeconds: CFTimeInterval = 0.2
+	private var lastFrameTime: CFTimeInterval = 0
 
 	// Framework objects — owned by the delegate, never by the actor
 	private(set) var captureSession: AVCaptureSession?
@@ -61,6 +73,15 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 			throw PhotoCaptureClient.Error.cannotAddOutput
 		}
 		session.addOutput(output)
+
+		// Add video data output for frame delivery
+		let videoOutput = AVCaptureVideoDataOutput()
+		videoOutput.setSampleBufferDelegate(self, queue: videoDataQueue)
+		videoOutput.alwaysDiscardsLateVideoFrames = true
+		if session.canAddOutput(videoOutput) {
+			session.addOutput(videoOutput)
+			self.videoDataOutput = videoOutput
+		}
 
 		session.commitConfiguration()
 
@@ -168,6 +189,9 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 			}
 		}
 		removeNotificationObservers()
+		pixelBufferContinuation?.finish()
+		pixelBufferContinuation = nil
+		videoDataOutput = nil
 		captureSession = nil
 		photoOutput = nil
 		currentDevice = nil
@@ -300,6 +324,38 @@ extension PhotoCaptureDelegate: AVCapturePhotoCaptureDelegate {
 	}
 }
 
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+
+extension PhotoCaptureDelegate: AVCaptureVideoDataOutputSampleBufferDelegate {
+	func captureOutput(
+		_ output: AVCaptureOutput,
+		didOutput sampleBuffer: CMSampleBuffer,
+		from connection: AVCaptureConnection
+	) {
+		// Throttle: skip frames if we're delivering too fast
+		let now = CACurrentMediaTime()
+		guard now - lastFrameTime >= frameIntervalSeconds else { return }
+		lastFrameTime = now
+
+		guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+		let width = CVPixelBufferGetWidth(pixelBuffer)
+		let height = CVPixelBufferGetHeight(pixelBuffer)
+		let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+
+		let wrapper = PhotoCaptureClient.PixelBufferWrapper(
+			pixelBuffer: pixelBuffer,
+			width: width,
+			height: height,
+			bytesPerRow: bytesPerRow,
+			timestamp: .now
+		)
+
+		// Yield directly into the continuation — no actor hop needed
+		pixelBufferContinuation?.yield(wrapper)
+	}
+}
+
 // MARK: - Actor
 
 /// Plain actor that manages AVFoundation photo capture via a delegate.
@@ -353,6 +409,8 @@ actor PhotoCaptureClientActor {
 			return
 		}
 		logger("Stopping capture session")
+		delegate.pixelBufferContinuation?.finish()
+		delegate.pixelBufferContinuation = nil
 		delegate.teardown()
 		for continuation in eventContinuations.values {
 			continuation.finish()
@@ -422,6 +480,23 @@ actor PhotoCaptureClientActor {
 
 	private func removeContinuation(id: UUID) {
 		eventContinuations.removeValue(forKey: id)
+	}
+
+	// MARK: - Frame Delivery
+
+	func observePixelBuffers() -> AsyncStream<PhotoCaptureClient.PixelBufferWrapper> {
+		return AsyncStream { continuation in
+			// The delegate writes directly into this continuation from the video data queue.
+			// Only one subscriber is supported at a time (last subscriber wins).
+			delegate.pixelBufferContinuation = continuation
+			continuation.onTermination = { [weak self] _ in
+				Task { await self?.clearPixelBufferContinuation() }
+			}
+		}
+	}
+
+	private func clearPixelBufferContinuation() {
+		delegate.pixelBufferContinuation = nil
 	}
 
 	// MARK: - Preview
