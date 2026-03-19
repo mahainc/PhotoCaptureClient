@@ -161,7 +161,7 @@ extension PhotoCaptureClient {
 extension PhotoCaptureClient {
 	/// A Sendable wrapper around CVPixelBuffer for crossing isolation boundaries.
 	/// CVPixelBuffer is not Sendable, so this wrapper retains it and exposes metadata.
-	/// Follows the same pattern as `PreviewLayer`.
+	/// Follows the same pattern as `PreviewView`.
 	public final class PixelBufferWrapper: @unchecked Sendable {
 		/// The underlying pixel buffer. Retained for the lifetime of this wrapper.
 		public let pixelBuffer: CVPixelBuffer
@@ -191,6 +191,7 @@ extension PhotoCaptureClient {
 extension PhotoCaptureClient {
 	/// A normalized overlay rectangle for drawing on the Metal preview.
 	/// Coordinates are in 0.0-1.0 space (top-left origin).
+	/// Color is RGBA with values in range [0.0, 1.0].
 	public struct OverlayRect: Sendable, Equatable {
 		public let x: Float
 		public let y: Float
