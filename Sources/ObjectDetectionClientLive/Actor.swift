@@ -50,11 +50,11 @@ actor ObjectDetectionClientActor {
 		?? Bundle.module.url(forResource: name, withExtension: "mlpackage")
 	}
 
-	/// Load model using CoreML/Vision directly. Uses .cpuAndGPU to avoid Neural Engine
-	/// MLIR pass manager crashes that occur with .all on certain devices.
+	/// Load model using CoreML/Vision directly. Uses .cpuAndNeuralEngine to leverage
+	/// the Apple Neural Engine for fastest inference while avoiding GPU MLIR crashes.
 	private func loadModel(from modelURL: URL) throws -> (VNCoreMLModel, [String]) {
 		let config = MLModelConfiguration()
-		config.computeUnits = .cpuAndGPU
+		config.computeUnits = .cpuAndNeuralEngine
 
 		let mlModel: MLModel
 		if modelURL.pathExtension == "mlmodelc" {
@@ -127,7 +127,7 @@ actor ObjectDetectionClientActor {
 			let (loadedModel, loadedLabels) = try loadModel(from: modelURL)
 			self.vnModel = loadedModel
 			self.labels = loadedLabels
-			logger("YOLO model loaded successfully (\(loadedLabels.count) classes, using cpuAndGPU)")
+			logger("YOLO model loaded successfully (\(loadedLabels.count) classes, using cpuAndNeuralEngine)")
 		} catch {
 			throw ObjectDetectionClient.Error.modelLoadFailed(
 				"Model loading failed: \(error.localizedDescription)"
