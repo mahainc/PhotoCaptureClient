@@ -47,7 +47,9 @@ actor ObjectDetectionClientActor {
 	// MARK: - Model Loading
 
 	private func bundledModelURL(name: String) -> URL? {
-		Bundle.module.url(forResource: name, withExtension: "mlpackage")
+		// Xcode compiles .mlpackage → .mlmodelc during build, so check both
+		Bundle.module.url(forResource: name, withExtension: "mlmodelc")
+		?? Bundle.module.url(forResource: name, withExtension: "mlpackage")
 	}
 
 	// MARK: - Start / Stop
