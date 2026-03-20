@@ -250,15 +250,24 @@ actor ObjectDetectionClientActor {
 			activeLabels = loadedLabels
 		}
 
-		guard let uiImage = UIImage(data: imageData),
-			  let ciImage = CIImage(image: uiImage) else {
+		guard let uiImage = UIImage(data: imageData) else {
 			throw ObjectDetectionClient.Error.inferenceFailed("Invalid image data")
+		}
+
+		// Bake orientation into pixel data so Vision sees the same
+		// orientation that cropImage will use later
+		let renderer = UIGraphicsImageRenderer(size: uiImage.size)
+		let orientedImage = renderer.image { _ in
+			uiImage.draw(in: CGRect(origin: .zero, size: uiImage.size))
+		}
+		guard let cgImage = orientedImage.cgImage else {
+			throw ObjectDetectionClient.Error.inferenceFailed("Failed to render oriented image")
 		}
 
 		let request = VNCoreMLRequest(model: activeModel)
 		request.imageCropAndScaleOption = .scaleFill
 
-		let handler = VNImageRequestHandler(ciImage: ciImage, options: [:])
+		let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
 		let start = CFAbsoluteTimeGetCurrent()
 		try handler.perform([request])
 		let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
