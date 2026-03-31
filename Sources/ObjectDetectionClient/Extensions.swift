@@ -10,7 +10,7 @@ extension ObjectDetectionClient.Configuration {
     public static let highAccuracy = Self(
         modelName: "yolo11n",
         confidenceThreshold: 0.1,
-        maxDetections: 50
+        maxDetections: 15
     )
 
     /// Fast configuration with higher confidence threshold for fewer, more confident detections.

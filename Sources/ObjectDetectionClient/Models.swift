@@ -91,16 +91,20 @@ extension ObjectDetectionClient {
         public var modelName: String
         /// Minimum confidence threshold (0.0-1.0).
         public var confidenceThreshold: Float
+        /// IoU threshold for non-maximum suppression (0.0-1.0).
+        public var iouThreshold: Float
         /// Maximum number of detections per frame.
         public var maxDetections: Int
 
         public init(
             modelName: String = "yolo11n",
-            confidenceThreshold: Float = 0.25,
-            maxDetections: Int = 20
+            confidenceThreshold: Float = 0.4,
+            iouThreshold: Float = 0.45,
+            maxDetections: Int = 5
         ) {
             self.modelName = modelName
             self.confidenceThreshold = confidenceThreshold
+            self.iouThreshold = iouThreshold
             self.maxDetections = maxDetections
         }
     }

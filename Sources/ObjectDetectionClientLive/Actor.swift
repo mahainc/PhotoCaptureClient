@@ -91,8 +91,8 @@ actor ObjectDetectionClientActor {
 		let vnModel = try VNCoreMLModel(for: mlModel)
 
 		// Set thresholds via feature provider
-		let iouThreshold = 0.45
-		let confidenceThreshold = Double(configuration?.confidenceThreshold ?? 0.25)
+		let iouThreshold = Double(configuration?.iouThreshold ?? 0.45)
+		let confidenceThreshold = Double(configuration?.confidenceThreshold ?? 0.4)
 		vnModel.featureProvider = ThresholdProvider(
 			iouThreshold: iouThreshold,
 			confidenceThreshold: confidenceThreshold
