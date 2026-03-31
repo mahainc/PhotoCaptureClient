@@ -9,3 +9,5 @@ xcuserdata/
 *.pt
 # Root-level mlpackage files from export (not the bundled one)
 /yolo*.mlpackage
+
+.worktrees/
