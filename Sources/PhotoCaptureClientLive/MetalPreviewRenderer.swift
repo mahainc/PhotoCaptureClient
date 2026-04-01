@@ -74,6 +74,9 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 	/// Baseline zoom captured at pinch gesture start.
 	private var baseZoomFactor: CGFloat = 1.0
 
+	/// Back-reference to PreviewView for syncing aspect-fill values to consumers.
+	weak var previewViewRef: PhotoCaptureClient.PreviewView?
+
 	/// Aspect-fill uniforms — recomputed when drawable size or texture size changes.
 	private var aspectFillUniforms = AspectFillUniforms(
 		uvScale: SIMD2<Float>(1, 1),
@@ -277,10 +280,13 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 			scaleY = texAspect / viewAspect
 		}
 
-		aspectFillUniforms = AspectFillUniforms(
-			uvScale: SIMD2<Float>(scaleX, scaleY),
-			uvOffset: SIMD2<Float>((1.0 - scaleX) * 0.5, (1.0 - scaleY) * 0.5)
-		)
+		let scale = SIMD2<Float>(scaleX, scaleY)
+		let offset = SIMD2<Float>((1.0 - scaleX) * 0.5, (1.0 - scaleY) * 0.5)
+		aspectFillUniforms = AspectFillUniforms(uvScale: scale, uvOffset: offset)
+
+		// Sync to PreviewView so consumers (e.g. label overlays) can correct coordinates
+		previewViewRef?.uvScale = scale
+		previewViewRef?.uvOffset = offset
 	}
 }
 
@@ -357,14 +363,24 @@ extension MetalPreviewRenderer: MTKViewDelegate {
 
 		let pointer = boxVertexBuffer.contents().bindMemory(to: BoxVertex.self, capacity: maxBoxVertices)
 
+		// Aspect-fill maps screen UV to texture UV via: texUV = screenUV * uvScale + uvOffset
+		// To place overlays (in texture space) on screen: screenUV = (texUV - uvOffset) / uvScale
+		let uvScale = aspectFillUniforms.uvScale
+		let uvOffset = aspectFillUniforms.uvOffset
+
 		var idx = 0
 		for i in 0..<min(overlays.count, maxBoxes) {
 			let overlay = overlays[i]
-			// Convert from 0..1 normalized (top-left origin) to Metal clip space (-1..1, bottom-left origin)
-			let left = overlay.x * 2.0 - 1.0
-			let right = (overlay.x + overlay.width) * 2.0 - 1.0
-			let top = 1.0 - overlay.y * 2.0
-			let bottom = 1.0 - (overlay.y + overlay.height) * 2.0
+			// Map from texture-normalized (0..1) to screen-normalized (0..1) accounting for aspect-fill crop
+			let screenX = (overlay.x - uvOffset.x) / uvScale.x
+			let screenY = (overlay.y - uvOffset.y) / uvScale.y
+			let screenW = overlay.width / uvScale.x
+			let screenH = overlay.height / uvScale.y
+			// Convert from screen-normalized (0..1, top-left origin) to Metal clip space (-1..1, bottom-left origin)
+			let left = screenX * 2.0 - 1.0
+			let right = (screenX + screenW) * 2.0 - 1.0
+			let top = 1.0 - screenY * 2.0
+			let bottom = 1.0 - (screenY + screenH) * 2.0
 
 			let color = overlay.color
 

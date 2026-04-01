@@ -396,6 +396,7 @@ actor PhotoCaptureClientActor {
 	private var currentFlashMode: PhotoCaptureClient.FlashMode = .auto
 	#if os(iOS)
 	private var metalRenderer: MetalPreviewRenderer?
+	private var cachedPreviewView: PhotoCaptureClient.PreviewView?
 	#endif
 	private var eventContinuations: [UUID: AsyncStream<PhotoCaptureClient.Event>.Continuation] = [:]
 
@@ -441,6 +442,12 @@ actor PhotoCaptureClientActor {
 			guard let self else { return }
 			Task { await self.handlePinchZoom(factor) }
 		}
+		// Link renderer to cached preview view (if getPreviewView was called before startSession)
+		if let renderer, let cached = cachedPreviewView {
+			renderer.previewViewRef = cached
+		}
+		// Invalidate cached preview so next getPreviewView returns one with the new renderer
+		cachedPreviewView = nil
 		#endif
 		logger("Starting capture session")
 		delegate.startRunning()
@@ -577,10 +584,18 @@ actor PhotoCaptureClientActor {
 
 	#if os(iOS)
 	func getPreviewView() -> PhotoCaptureClient.PreviewView {
-		if let renderer = metalRenderer {
-			return PhotoCaptureClient.PreviewView(view: renderer)
+		if let cached = cachedPreviewView {
+			return cached
 		}
-		return PhotoCaptureClient.PreviewView(view: UIView())
+		let preview: PhotoCaptureClient.PreviewView
+		if let renderer = metalRenderer {
+			preview = PhotoCaptureClient.PreviewView(view: renderer)
+			renderer.previewViewRef = preview
+		} else {
+			preview = PhotoCaptureClient.PreviewView(view: UIView())
+		}
+		cachedPreviewView = preview
+		return preview
 	}
 
 	func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {

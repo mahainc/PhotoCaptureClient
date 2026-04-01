@@ -143,6 +143,14 @@ extension PhotoCaptureClient {
 		public let view: NSView
 		#endif
 
+		/// Aspect-fill UV scale — how much of the texture is visible (1.0 = full, <1.0 = cropped).
+		/// Updated by the renderer whenever drawable or texture size changes. Read on main thread.
+		public var uvScale: SIMD2<Float> = SIMD2<Float>(1, 1)
+
+		/// Aspect-fill UV offset — the origin offset of the visible texture region.
+		/// Updated by the renderer whenever drawable or texture size changes. Read on main thread.
+		public var uvOffset: SIMD2<Float> = SIMD2<Float>(0, 0)
+
 		#if os(iOS)
 		public init(view: UIView) {
 			self.view = view
@@ -152,6 +160,17 @@ extension PhotoCaptureClient {
 			self.view = view
 		}
 		#endif
+
+		/// Convert a normalized texture coordinate (0-1) to a view-relative coordinate (0-1),
+		/// accounting for aspect-fill cropping.
+		public func textureToView(x: Float, y: Float) -> (x: Float, y: Float) {
+			return ((x - uvOffset.x) / uvScale.x, (y - uvOffset.y) / uvScale.y)
+		}
+
+		/// Convert a normalized texture size to a view-relative size, accounting for aspect-fill.
+		public func textureToViewSize(w: Float, h: Float) -> (w: Float, h: Float) {
+			return (w / uvScale.x, h / uvScale.y)
+		}
 
 		public static func == (lhs: PreviewView, rhs: PreviewView) -> Bool {
 			lhs.view === rhs.view
