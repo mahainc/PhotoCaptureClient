@@ -437,6 +437,10 @@ actor PhotoCaptureClientActor {
 		delegate.onFrame = { [weak renderer] pixelBuffer in
 			renderer?.enqueueFrame(pixelBuffer)
 		}
+		renderer?.onZoom = { [weak self] factor in
+			guard let self else { return }
+			Task { await self.handlePinchZoom(factor) }
+		}
 		#endif
 		logger("Starting capture session")
 		delegate.startRunning()
@@ -481,6 +485,10 @@ actor PhotoCaptureClientActor {
 		logger("Switching camera to \(position)")
 		try delegate.switchCamera(to: position)
 		currentPosition = position
+		#if os(iOS)
+		await MainActor.run { metalRenderer?.currentZoomFactor = 1.0 }
+		yieldEvent(.zoomChanged(1.0))
+		#endif
 	}
 
 	func setFlashMode(_ mode: PhotoCaptureClient.FlashMode) {
@@ -496,6 +504,26 @@ actor PhotoCaptureClientActor {
 	func setZoomFactor(_ factor: CGFloat) async throws {
 		logger("Setting zoom factor to \(factor)")
 		try delegate.setZoomFactor(factor)
+		#if os(iOS)
+		await MainActor.run { metalRenderer?.currentZoomFactor = factor }
+		yieldEvent(.zoomChanged(factor))
+		#endif
+	}
+
+	private func handlePinchZoom(_ requestedFactor: CGFloat) {
+		#if os(iOS)
+		guard let device = delegate.currentDevice else { return }
+		let clamped = min(max(requestedFactor, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
+		do {
+			try delegate.setZoomFactor(clamped)
+			Task { @MainActor [weak self] in
+				self?.metalRenderer?.currentZoomFactor = clamped
+			}
+			yieldEvent(.zoomChanged(clamped))
+		} catch {
+			logger("Pinch zoom error: \(error)")
+		}
+		#endif
 	}
 
 	// MARK: - Authorization

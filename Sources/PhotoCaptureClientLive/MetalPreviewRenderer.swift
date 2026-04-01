@@ -63,6 +63,17 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 	/// Dirty flag — set by enqueueFrame, cleared by draw. Prevents redundant draws.
 	private let _needsDraw = OSAllocatedUnfairLock<Bool>(initialState: false)
 
+	// MARK: - Zoom State
+
+	/// Callback invoked on pinch gesture with the requested zoom factor.
+	var onZoom: ((_ factor: CGFloat) -> Void)?
+
+	/// Current zoom factor — updated by the actor after applying zoom. Read on gesture `.began`.
+	var currentZoomFactor: CGFloat = 1.0
+
+	/// Baseline zoom captured at pinch gesture start.
+	private var baseZoomFactor: CGFloat = 1.0
+
 	/// Aspect-fill uniforms — recomputed when drawable size or texture size changes.
 	private var aspectFillUniforms = AspectFillUniforms(
 		uvScale: SIMD2<Float>(1, 1),
@@ -165,6 +176,9 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 			mtkView.trailingAnchor.constraint(equalTo: trailingAnchor),
 		])
 
+		let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+		addGestureRecognizer(pinch)
+
 		NotificationCenter.default.addObserver(
 			forName: UIApplication.didReceiveMemoryWarningNotification,
 			object: nil,
@@ -182,6 +196,20 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 
 	deinit {
 		NotificationCenter.default.removeObserver(self)
+	}
+
+	// MARK: - Pinch-to-Zoom
+
+	@objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+		switch gesture.state {
+		case .began:
+			baseZoomFactor = currentZoomFactor
+		case .changed:
+			let newFactor = baseZoomFactor * gesture.scale
+			onZoom?(newFactor)
+		default:
+			break
+		}
 	}
 
 	// MARK: - Public API

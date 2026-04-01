@@ -112,6 +112,9 @@ extension PhotoCaptureClient {
 		case willCapturePhoto
 		case didCapturePhoto
 		case captureCompleted
+
+		// Zoom
+		case zoomChanged(CGFloat)
 	}
 }
 
