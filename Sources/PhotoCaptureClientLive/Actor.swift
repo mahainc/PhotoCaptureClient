@@ -486,7 +486,8 @@ actor PhotoCaptureClientActor {
 		try delegate.switchCamera(to: position)
 		currentPosition = position
 		#if os(iOS)
-		await MainActor.run { metalRenderer?.currentZoomFactor = 1.0 }
+		let renderer = metalRenderer
+		await MainActor.run { renderer?.currentZoomFactor = 1.0 }
 		yieldEvent(.zoomChanged(1.0))
 		#endif
 	}
@@ -505,7 +506,8 @@ actor PhotoCaptureClientActor {
 		logger("Setting zoom factor to \(factor)")
 		try delegate.setZoomFactor(factor)
 		#if os(iOS)
-		await MainActor.run { metalRenderer?.currentZoomFactor = factor }
+		let renderer = metalRenderer
+		await MainActor.run { renderer?.currentZoomFactor = factor }
 		yieldEvent(.zoomChanged(factor))
 		#endif
 	}
@@ -516,8 +518,9 @@ actor PhotoCaptureClientActor {
 		let clamped = min(max(requestedFactor, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
 		do {
 			try delegate.setZoomFactor(clamped)
-			Task { @MainActor [weak self] in
-				self?.metalRenderer?.currentZoomFactor = clamped
+			let renderer = metalRenderer
+			Task { @MainActor in
+				renderer?.currentZoomFactor = clamped
 			}
 			yieldEvent(.zoomChanged(clamped))
 		} catch {
