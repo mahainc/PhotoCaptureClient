@@ -11,6 +11,9 @@ import os
 private struct AspectFillUniforms {
 	var uvScale: SIMD2<Float>
 	var uvOffset: SIMD2<Float>
+	var zoomFactor: Float
+	var _pad: Float
+	var zoomAnchor: SIMD2<Float>
 }
 
 // MARK: - Box Vertex (matches Metal struct layout)
@@ -63,24 +66,23 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 	/// Dirty flag — set by enqueueFrame, cleared by draw. Prevents redundant draws.
 	private let _needsDraw = OSAllocatedUnfairLock<Bool>(initialState: false)
 
-	// MARK: - Zoom State
+	// MARK: - Visual Zoom State
 
-	/// Callback invoked on pinch gesture with the requested zoom factor.
-	var onZoom: ((_ factor: CGFloat) -> Void)?
+	/// Visual zoom state — set externally by the actor, read during draw. Thread-safe.
+	private let _visualZoom = OSAllocatedUnfairLock<(factor: Float, anchorX: Float, anchorY: Float)>(
+		initialState: (factor: 1.0, anchorX: 0.5, anchorY: 0.5)
+	)
 
-	/// Current zoom factor — updated by the actor after applying zoom. Read on gesture `.began`.
-	var currentZoomFactor: CGFloat = 1.0
-
-	/// Baseline zoom captured at pinch gesture start.
-	private var baseZoomFactor: CGFloat = 1.0
-
-	/// Back-reference to PreviewView for syncing aspect-fill values to consumers.
+	/// Back-reference to PreviewView for syncing aspect-fill and zoom values to consumers.
 	weak var previewViewRef: PhotoCaptureClient.PreviewView?
 
 	/// Aspect-fill uniforms — recomputed when drawable size or texture size changes.
 	private var aspectFillUniforms = AspectFillUniforms(
 		uvScale: SIMD2<Float>(1, 1),
-		uvOffset: SIMD2<Float>(0, 0)
+		uvOffset: SIMD2<Float>(0, 0),
+		zoomFactor: 1.0,
+		_pad: 0,
+		zoomAnchor: SIMD2<Float>(0.5, 0.5)
 	)
 	private var lastTextureSize: SIMD2<Float> = .zero
 
@@ -179,9 +181,6 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 			mtkView.trailingAnchor.constraint(equalTo: trailingAnchor),
 		])
 
-		let pinch = UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
-		addGestureRecognizer(pinch)
-
 		NotificationCenter.default.addObserver(
 			forName: UIApplication.didReceiveMemoryWarningNotification,
 			object: nil,
@@ -201,18 +200,23 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 		NotificationCenter.default.removeObserver(self)
 	}
 
-	// MARK: - Pinch-to-Zoom
+	// MARK: - Visual Zoom API
 
-	@objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
-		switch gesture.state {
-		case .began:
-			baseZoomFactor = currentZoomFactor
-		case .changed:
-			let newFactor = baseZoomFactor * gesture.scale
-			onZoom?(newFactor)
-		default:
-			break
+	/// Set visual zoom from the actor. Triggers a redraw.
+	func setVisualZoom(factor: Float, anchorX: Float, anchorY: Float) {
+		_visualZoom.withLock { $0 = (factor: factor, anchorX: anchorX, anchorY: anchorY) }
+		previewViewRef?.visualZoomFactor = factor
+		previewViewRef?.visualZoomAnchorX = anchorX
+		previewViewRef?.visualZoomAnchorY = anchorY
+		_needsDraw.withLock { $0 = true }
+		DispatchQueue.main.async { [weak self] in
+			self?.mtkView.setNeedsDisplay()
 		}
+	}
+
+	/// Reset zoom to default (e.g., on camera switch).
+	func resetVisualZoom() {
+		setVisualZoom(factor: 1.0, anchorX: 0.5, anchorY: 0.5)
 	}
 
 	// MARK: - Public API
@@ -282,7 +286,14 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 
 		let scale = SIMD2<Float>(scaleX, scaleY)
 		let offset = SIMD2<Float>((1.0 - scaleX) * 0.5, (1.0 - scaleY) * 0.5)
-		aspectFillUniforms = AspectFillUniforms(uvScale: scale, uvOffset: offset)
+		let zoom = _visualZoom.withLock { $0 }
+		aspectFillUniforms = AspectFillUniforms(
+			uvScale: scale,
+			uvOffset: offset,
+			zoomFactor: zoom.factor,
+			_pad: 0,
+			zoomAnchor: SIMD2<Float>(zoom.anchorX, zoom.anchorY)
+		)
 
 		// Sync to PreviewView so consumers (e.g. label overlays) can correct coordinates
 		previewViewRef?.uvScale = scale
@@ -330,9 +341,12 @@ extension MetalPreviewRenderer: MTKViewDelegate {
 			return
 		}
 
-		// 1. Draw camera frame (fullscreen textured quad with aspect-fill)
+		// 1. Draw camera frame (fullscreen textured quad with aspect-fill + zoom)
 		encoder.setRenderPipelineState(cameraPipeline)
 		var uniforms = aspectFillUniforms
+		let zoom = _visualZoom.withLock { $0 }
+		uniforms.zoomFactor = zoom.factor
+		uniforms.zoomAnchor = SIMD2<Float>(zoom.anchorX, zoom.anchorY)
 		encoder.setVertexBytes(&uniforms, length: MemoryLayout<AspectFillUniforms>.size, index: 0)
 		encoder.setFragmentTexture(frame.mtlTexture, index: 0)
 		encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
@@ -365,17 +379,27 @@ extension MetalPreviewRenderer: MTKViewDelegate {
 
 		// Aspect-fill maps screen UV to texture UV via: texUV = screenUV * uvScale + uvOffset
 		// To place overlays (in texture space) on screen: screenUV = (texUV - uvOffset) / uvScale
+		// Then apply zoom inverse: zoomedScreenUV = (screenUV - anchor) * zoom + anchor
 		let uvScale = aspectFillUniforms.uvScale
 		let uvOffset = aspectFillUniforms.uvOffset
+		let zoomState = _visualZoom.withLock { $0 }
+		let zFactor = zoomState.factor
+		let zAnchorX = zoomState.anchorX
+		let zAnchorY = zoomState.anchorY
 
 		var idx = 0
 		for i in 0..<min(overlays.count, maxBoxes) {
 			let overlay = overlays[i]
 			// Map from texture-normalized (0..1) to screen-normalized (0..1) accounting for aspect-fill crop
-			let screenX = (overlay.x - uvOffset.x) / uvScale.x
-			let screenY = (overlay.y - uvOffset.y) / uvScale.y
-			let screenW = overlay.width / uvScale.x
-			let screenH = overlay.height / uvScale.y
+			let baseScreenX = (overlay.x - uvOffset.x) / uvScale.x
+			let baseScreenY = (overlay.y - uvOffset.y) / uvScale.y
+			let baseScreenW = overlay.width / uvScale.x
+			let baseScreenH = overlay.height / uvScale.y
+			// Apply zoom transform (inverse of shader: shader divides by zoom, so here multiply)
+			let screenX = (baseScreenX - zAnchorX) * zFactor + zAnchorX
+			let screenY = (baseScreenY - zAnchorY) * zFactor + zAnchorY
+			let screenW = baseScreenW * zFactor
+			let screenH = baseScreenH * zFactor
 			// Convert from screen-normalized (0..1, top-left origin) to Metal clip space (-1..1, bottom-left origin)
 			let left = screenX * 2.0 - 1.0
 			let right = (screenX + screenW) * 2.0 - 1.0

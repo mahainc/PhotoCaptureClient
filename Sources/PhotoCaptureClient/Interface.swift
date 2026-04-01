@@ -41,6 +41,13 @@ public struct PhotoCaptureClient: Sendable {
 
 	public var setZoomFactor: @Sendable (_ factor: CGFloat) async throws -> Void
 
+	/// Set visual zoom in the Metal shader (not AVFoundation).
+	/// - Parameters:
+	///   - factor: Zoom level (1.0 = no zoom, max ~5.0)
+	///   - anchorX: Normalized screen X coordinate of the zoom center (0-1)
+	///   - anchorY: Normalized screen Y coordinate of the zoom center (0-1)
+	public var setVisualZoom: @Sendable (_ factor: CGFloat, _ anchorX: CGFloat, _ anchorY: CGFloat) async -> Void = { _, _, _ in }
+
 	// MARK: - Authorization
 
 	public var requestAuthorization: @Sendable () async -> AuthorizationStatus = { .notDetermined }

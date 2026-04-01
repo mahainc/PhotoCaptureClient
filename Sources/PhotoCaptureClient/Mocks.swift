@@ -54,6 +54,7 @@ extension PhotoCaptureClient {
 		setFlashMode: { _ in },
 		focus: { _ in },
 		setZoomFactor: { _ in },
+		setVisualZoom: { _, _, _ in },
 		requestAuthorization: { .authorized },
 		authorizationStatus: { .authorized },
 		events: { AsyncStream { _ in } },
@@ -83,6 +84,7 @@ extension PhotoCaptureClient {
 		setFlashMode: { _ in },
 		focus: { _ in },
 		setZoomFactor: { _ in },
+		setVisualZoom: { _, _, _ in },
 		requestAuthorization: { .authorized },
 		authorizationStatus: { .authorized },
 		events: {
@@ -117,6 +119,7 @@ extension PhotoCaptureClient {
 		setZoomFactor: { _ in
 			throw PhotoCaptureClient.Error.zoomFactorOutOfRange(min: 1.0, max: 10.0)
 		},
+		setVisualZoom: { _, _, _ in },
 		requestAuthorization: { .denied },
 		authorizationStatus: { .denied },
 		events: {

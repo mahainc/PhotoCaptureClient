@@ -3,10 +3,13 @@ using namespace metal;
 
 // MARK: - Aspect-Fill Uniform
 
-/// Passed from CPU to adjust texture coordinates for aspect-fill cropping.
+/// Passed from CPU to adjust texture coordinates for aspect-fill cropping and zoom.
 struct AspectFillUniforms {
-    float2 uvScale;   // Scale factor to crop the texture (> 1.0 means crop)
-    float2 uvOffset;  // Offset to center the cropped region
+    float2 uvScale;      // Scale factor to crop the texture (> 1.0 means crop)
+    float2 uvOffset;     // Offset to center the cropped region
+    float  zoomFactor;   // Visual zoom level (1.0 = no zoom, >1.0 = zoomed in)
+    float  _pad;         // Padding for 16-byte alignment
+    float2 zoomAnchor;   // Screen-space anchor point for zoom (0-1, top-left origin)
 };
 
 // MARK: - Camera Frame Rendering (fullscreen textured quad with aspect-fill)
@@ -24,8 +27,11 @@ vertex CameraVertexOut cameraVertex(uint vertexID [[vertex_id]],
     // Triangle covering [-1,-1] to [3,3] in clip space
     float2 pos = float2((vertexID << 1) & 2, vertexID & 2);
     out.position = float4(pos * 2.0 - 1.0, 0.0, 1.0);
-    // Flip Y for top-left origin, then apply aspect-fill scale and offset
+    // Flip Y for top-left origin
     float2 uv = float2(pos.x, 1.0 - pos.y);
+    // Apply zoom anchored at zoomAnchor in screen space
+    uv = (uv - uniforms.zoomAnchor) / uniforms.zoomFactor + uniforms.zoomAnchor;
+    // Then apply aspect-fill scale and offset
     out.texCoord = uv * uniforms.uvScale + uniforms.uvOffset;
     return out;
 }

@@ -397,6 +397,7 @@ actor PhotoCaptureClientActor {
 	#if os(iOS)
 	private var metalRenderer: MetalPreviewRenderer?
 	private var cachedPreviewView: PhotoCaptureClient.PreviewView?
+	private var currentVisualZoom: (factor: Float, anchorX: Float, anchorY: Float) = (1.0, 0.5, 0.5)
 	#endif
 	private var eventContinuations: [UUID: AsyncStream<PhotoCaptureClient.Event>.Continuation] = [:]
 
@@ -437,10 +438,6 @@ actor PhotoCaptureClientActor {
 		self.metalRenderer = renderer
 		delegate.onFrame = { [weak renderer] pixelBuffer in
 			renderer?.enqueueFrame(pixelBuffer)
-		}
-		renderer?.onZoom = { [weak self] factor in
-			guard let self else { return }
-			Task { await self.handlePinchZoom(factor) }
 		}
 		// Link renderer to cached preview view (if getPreviewView was called before startSession)
 		if let renderer, let cached = cachedPreviewView {
@@ -493,8 +490,9 @@ actor PhotoCaptureClientActor {
 		try delegate.switchCamera(to: position)
 		currentPosition = position
 		#if os(iOS)
+		currentVisualZoom = (1.0, 0.5, 0.5)
 		let renderer = metalRenderer
-		await MainActor.run { renderer?.currentZoomFactor = 1.0 }
+		await MainActor.run { renderer?.resetVisualZoom() }
 		yieldEvent(.zoomChanged(1.0))
 		#endif
 	}
@@ -512,27 +510,19 @@ actor PhotoCaptureClientActor {
 	func setZoomFactor(_ factor: CGFloat) async throws {
 		logger("Setting zoom factor to \(factor)")
 		try delegate.setZoomFactor(factor)
-		#if os(iOS)
-		let renderer = metalRenderer
-		await MainActor.run { renderer?.currentZoomFactor = factor }
-		yieldEvent(.zoomChanged(factor))
-		#endif
 	}
 
-	private func handlePinchZoom(_ requestedFactor: CGFloat) {
+	func setVisualZoom(factor: CGFloat, anchorX: CGFloat, anchorY: CGFloat) async {
 		#if os(iOS)
-		guard let device = delegate.currentDevice else { return }
-		let clamped = min(max(requestedFactor, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
-		do {
-			try delegate.setZoomFactor(clamped)
-			let renderer = metalRenderer
-			Task { @MainActor in
-				renderer?.currentZoomFactor = clamped
-			}
-			yieldEvent(.zoomChanged(clamped))
-		} catch {
-			logger("Pinch zoom error: \(error)")
+		let clamped = Float(min(max(factor, 1.0), 5.0))
+		let clampedAX = Float(min(max(anchorX, 0.0), 1.0))
+		let clampedAY = Float(min(max(anchorY, 0.0), 1.0))
+		currentVisualZoom = (clamped, clampedAX, clampedAY)
+		let renderer = metalRenderer
+		await MainActor.run {
+			renderer?.setVisualZoom(factor: clamped, anchorX: clampedAX, anchorY: clampedAY)
 		}
+		yieldEvent(.zoomChanged(CGFloat(clamped)))
 		#endif
 	}
 
@@ -591,6 +581,10 @@ actor PhotoCaptureClientActor {
 		if let renderer = metalRenderer {
 			preview = PhotoCaptureClient.PreviewView(view: renderer)
 			renderer.previewViewRef = preview
+			// Sync current visual zoom state
+			preview.visualZoomFactor = currentVisualZoom.factor
+			preview.visualZoomAnchorX = currentVisualZoom.anchorX
+			preview.visualZoomAnchorY = currentVisualZoom.anchorY
 		} else {
 			preview = PhotoCaptureClient.PreviewView(view: UIView())
 		}

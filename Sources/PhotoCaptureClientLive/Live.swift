@@ -27,6 +27,9 @@ extension PhotoCaptureClient: DependencyKey {
 			setZoomFactor: { factor in
 				try await actor.setZoomFactor(factor)
 			},
+			setVisualZoom: { factor, anchorX, anchorY in
+				await actor.setVisualZoom(factor: factor, anchorX: anchorX, anchorY: anchorY)
+			},
 			requestAuthorization: {
 				await actor.requestAuthorization()
 			},

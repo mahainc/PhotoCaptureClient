@@ -151,6 +151,13 @@ extension PhotoCaptureClient {
 		/// Updated by the renderer whenever drawable or texture size changes. Read on main thread.
 		public var uvOffset: SIMD2<Float> = SIMD2<Float>(0, 0)
 
+		/// Visual zoom factor — updated by the renderer. 1.0 = no zoom.
+		public var visualZoomFactor: Float = 1.0
+		/// Visual zoom anchor X in screen UV space (0-1).
+		public var visualZoomAnchorX: Float = 0.5
+		/// Visual zoom anchor Y in screen UV space (0-1).
+		public var visualZoomAnchorY: Float = 0.5
+
 		#if os(iOS)
 		public init(view: UIView) {
 			self.view = view
@@ -162,14 +169,20 @@ extension PhotoCaptureClient {
 		#endif
 
 		/// Convert a normalized texture coordinate (0-1) to a view-relative coordinate (0-1),
-		/// accounting for aspect-fill cropping.
+		/// accounting for aspect-fill cropping and visual zoom.
 		public func textureToView(x: Float, y: Float) -> (x: Float, y: Float) {
-			return ((x - uvOffset.x) / uvScale.x, (y - uvOffset.y) / uvScale.y)
+			// First: aspect-fill mapping (texture UV → screen UV without zoom)
+			let screenX = (x - uvOffset.x) / uvScale.x
+			let screenY = (y - uvOffset.y) / uvScale.y
+			// Then: apply zoom transform (inverse of shader division → multiply)
+			let zoomedX = (screenX - visualZoomAnchorX) * visualZoomFactor + visualZoomAnchorX
+			let zoomedY = (screenY - visualZoomAnchorY) * visualZoomFactor + visualZoomAnchorY
+			return (x: zoomedX, y: zoomedY)
 		}
 
-		/// Convert a normalized texture size to a view-relative size, accounting for aspect-fill.
+		/// Convert a normalized texture size to a view-relative size, accounting for aspect-fill and zoom.
 		public func textureToViewSize(w: Float, h: Float) -> (w: Float, h: Float) {
-			return (w / uvScale.x, h / uvScale.y)
+			return (w / uvScale.x * visualZoomFactor, h / uvScale.y * visualZoomFactor)
 		}
 
 		public static func == (lhs: PreviewView, rhs: PreviewView) -> Bool {
