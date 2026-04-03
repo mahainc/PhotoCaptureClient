@@ -84,6 +84,28 @@ extension MultiCamClient {
 	}
 }
 
+// MARK: - Video Stabilization
+
+extension MultiCamClient {
+	public enum StabilizationMode: String, Sendable, Equatable, CaseIterable, Codable {
+		case off
+		case standard
+		case cinematic
+		case cinematicExtended
+		case auto
+
+		public var label: String {
+			switch self {
+			case .off: "Off"
+			case .standard: "Standard"
+			case .cinematic: "Cinematic"
+			case .cinematicExtended: "Cinematic Ext"
+			case .auto: "Auto"
+			}
+		}
+	}
+}
+
 // MARK: - Session Configuration
 
 extension MultiCamClient {

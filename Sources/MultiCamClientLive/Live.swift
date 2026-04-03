@@ -29,6 +29,9 @@ extension MultiCamClient: DependencyKey {
 			zoomRange: { camera in
 				await actor.zoomRange(camera: camera)
 			},
+			setStabilization: { camera, mode in
+				await actor.setStabilization(camera: camera, mode: mode)
+			},
 			startRecording: { configuration in
 				try await actor.startRecording(configuration)
 			},

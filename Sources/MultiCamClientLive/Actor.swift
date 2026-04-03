@@ -249,6 +249,11 @@ actor MultiCamClientActor {
 
 	// MARK: - Zoom
 
+	func setStabilization(camera: MultiCamClient.CameraID, mode: MultiCamClient.StabilizationMode) {
+		delegate.setStabilization(for: camera, mode: mode)
+		logger("Stabilization set to \(mode.rawValue) for \(camera.rawValue)")
+	}
+
 	func setZoom(camera: MultiCamClient.CameraID, factor: CGFloat) throws {
 		try delegate.setZoom(for: camera, factor: factor)
 		yieldEvent(.zoomChanged(camera, factor))

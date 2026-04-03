@@ -57,6 +57,7 @@ extension MultiCamClient {
 		currentLayout: { .grid(.init()) },
 		setZoom: { _, _ in },
 		zoomRange: { _ in (1.0, 10.0) },
+		setStabilization: { _, _ in },
 		startRecording: { _ in },
 		pauseRecording: {},
 		resumeRecording: {},
@@ -90,6 +91,7 @@ extension MultiCamClient {
 		currentLayout: { .grid(.init()) },
 		setZoom: { _, _ in },
 		zoomRange: { _ in (1.0, 15.0) },
+		setStabilization: { _, _ in },
 		startRecording: { _ in
 			try await Task.sleep(nanoseconds: MockConstants.shortDelayNanoseconds)
 		},
@@ -145,6 +147,7 @@ extension MultiCamClient {
 		currentLayout: { .grid(.init()) },
 		setZoom: { _, _ in throw MultiCamClient.Error.sessionNotRunning },
 		zoomRange: { _ in (1.0, 1.0) },
+		setStabilization: { _, _ in },
 		startRecording: { _ in
 			throw MultiCamClient.Error.sessionNotRunning
 		},

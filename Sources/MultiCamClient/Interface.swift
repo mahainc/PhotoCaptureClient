@@ -61,6 +61,11 @@ public struct MultiCamClient: Sendable {
 	/// Get the supported zoom range (min, max) for a specific camera.
 	public var zoomRange: @Sendable (_ camera: CameraID) async -> (min: CGFloat, max: CGFloat) = { _ in (1.0, 1.0) }
 
+	// MARK: - Video Stabilization
+
+	/// Set stabilization mode for a specific camera.
+	public var setStabilization: @Sendable (_ camera: CameraID, _ mode: StabilizationMode) async -> Void = { _, _ in }
+
 	// MARK: - Recording
 
 	/// Start recording video from all active cameras.

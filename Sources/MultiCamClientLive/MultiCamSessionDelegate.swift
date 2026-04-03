@@ -162,9 +162,12 @@ final class MultiCamSessionDelegate: NSObject, @unchecked Sendable {
 			outputToCameraID[ObjectIdentifier(videoOutput)] = cameraID
 			addedCameras.append(cameraID)
 
-			// Rotate to portrait
+			// Rotate to portrait + apply default stabilization
 			if let connection = videoOutput.connection(with: .video) {
 				connection.videoRotationAngle = 90
+				if connection.isVideoStabilizationSupported {
+					connection.preferredVideoStabilizationMode = .standard
+				}
 			}
 		}
 
@@ -217,6 +220,32 @@ final class MultiCamSessionDelegate: NSObject, @unchecked Sendable {
 		try device.lockForConfiguration()
 		device.videoZoomFactor = clamped
 		device.unlockForConfiguration()
+	}
+
+	// MARK: - Video Stabilization
+
+	func setStabilization(for camera: MultiCamClient.CameraID, mode: MultiCamClient.StabilizationMode) {
+		guard let output = videoOutputs[camera],
+			  let connection = output.connection(with: .video),
+			  connection.isVideoStabilizationSupported else { return }
+
+		let avMode: AVCaptureVideoStabilizationMode
+		switch mode {
+		case .off: avMode = .off
+		case .standard: avMode = .standard
+		case .cinematic: avMode = .cinematic
+		case .cinematicExtended: avMode = .cinematicExtended
+		case .auto: avMode = .auto
+		}
+
+		// Check if the device format supports this mode
+		if let input = cameraInputs[camera],
+		   input.device.activeFormat.isVideoStabilizationModeSupported(avMode) {
+			connection.preferredVideoStabilizationMode = avMode
+		} else {
+			// Fallback to standard if requested mode not supported
+			connection.preferredVideoStabilizationMode = .standard
+		}
 	}
 
 	func zoomRange(for camera: MultiCamClient.CameraID) -> (min: CGFloat, max: CGFloat) {
