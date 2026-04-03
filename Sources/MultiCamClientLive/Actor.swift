@@ -179,8 +179,14 @@ actor MultiCamClientActor {
 		logger("Starting multi-cam session")
 		delegate.startRunning()
 
-		for camera in config.cameras {
+		// Only emit cameraConnected for cameras that actually passed hardware cost check
+		for camera in activeCameras {
 			yieldEvent(.cameraConnected(camera))
+		}
+		// Notify about dropped cameras
+		let dropped = config.cameras.filter { !activeCameras.contains($0) }
+		for camera in dropped {
+			yieldEvent(.cameraDisconnected(camera))
 		}
 	}
 

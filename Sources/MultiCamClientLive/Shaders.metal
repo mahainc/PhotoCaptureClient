@@ -13,7 +13,7 @@ struct MultiCamUniforms {
     float2 _pad2;          // Pad to 48 bytes total (float4 alignment)
 };
 
-// MARK: - Camera Frame Rendering
+// MARK: - Camera Frame Rendering (quad — 4 vertices as triangle strip)
 
 struct CameraVertexOut {
     float4 position [[position]];
@@ -21,28 +21,36 @@ struct CameraVertexOut {
     float2 normalizedPos;  // Position within the viewport (0-1)
 };
 
-/// Renders a camera texture into a viewport rect.
-/// vertexID 0,1,2 produces a fullscreen triangle; viewport transform maps it to the target rect.
+/// Renders a camera texture into a viewport rect using a quad (triangle strip, 4 vertices).
+/// vertexID 0-3 maps to the 4 corners of the viewport rectangle.
 vertex CameraVertexOut multiCamVertex(uint vertexID [[vertex_id]],
                                        constant MultiCamUniforms& uniforms [[buffer(0)]]) {
     CameraVertexOut out;
 
-    // Fullscreen triangle covering [0,0] to [2,2] in UV space
-    float2 pos = float2((vertexID << 1) & 2, vertexID & 2);
+    // Quad corners as triangle strip: TL, TR, BL, BR
+    //   0---1
+    //   | / |
+    //   2---3
+    float2 corners[4] = {
+        float2(0.0, 0.0),  // top-left
+        float2(1.0, 0.0),  // top-right
+        float2(0.0, 1.0),  // bottom-left
+        float2(1.0, 1.0),  // bottom-right
+    };
+
+    float2 pos = corners[vertexID];
 
     // Map to viewport rect in clip space (-1 to 1, bottom-left origin)
     float2 vpOrigin = uniforms.viewportRect.xy;
     float2 vpSize = uniforms.viewportRect.zw;
 
-    // Convert from 0-1 top-left origin to clip space (-1 to 1, bottom-left origin)
     float clipX = (vpOrigin.x + pos.x * vpSize.x) * 2.0 - 1.0;
     float clipY = 1.0 - (vpOrigin.y + pos.y * vpSize.y) * 2.0;
 
     out.position = float4(clipX, clipY, 0.0, 1.0);
 
     // Texture coordinates with aspect-fill
-    float2 uv = float2(pos.x, pos.y);
-    out.texCoord = uv * uniforms.uvScale + uniforms.uvOffset;
+    out.texCoord = pos * uniforms.uvScale + uniforms.uvOffset;
     out.normalizedPos = pos;
 
     return out;
@@ -77,7 +85,13 @@ struct FillVertexOut {
 
 vertex FillVertexOut fillVertex(uint vertexID [[vertex_id]]) {
     FillVertexOut out;
-    float2 pos = float2((vertexID << 1) & 2, vertexID & 2);
+    float2 corners[4] = {
+        float2(0.0, 0.0),
+        float2(1.0, 0.0),
+        float2(0.0, 1.0),
+        float2(1.0, 1.0),
+    };
+    float2 pos = corners[vertexID];
     out.position = float4(pos * 2.0 - 1.0, 0.0, 1.0);
     return out;
 }

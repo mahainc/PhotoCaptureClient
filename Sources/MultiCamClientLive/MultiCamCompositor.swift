@@ -192,6 +192,13 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 
 	func setLayout(_ layout: MultiCamClient.Layout) {
 		_layout.withLock { $0 = layout }
+
+		// For custom layouts, update camera list from the layout's frame keys
+		if case .custom(let custom) = layout {
+			let layoutCameras = Array(custom.frames.keys).sorted { $0.rawValue < $1.rawValue }
+			_cameras.withLock { $0 = layoutCameras }
+		}
+
 		let cameras = _cameras.withLock { $0 }
 		let viewports = layoutEngine.computeViewports(layout: layout, cameras: cameras)
 		_viewports.withLock { $0 = viewports }
@@ -312,7 +319,7 @@ extension MultiCamCompositor: MTKViewDelegate {
 			encoder.setVertexBytes(&uniforms, length: MemoryLayout<MultiCamUniforms>.stride, index: 0)
 			encoder.setFragmentTexture(frame.mtlTexture, index: 0)
 			encoder.setFragmentBytes(&uniforms, length: MemoryLayout<MultiCamUniforms>.stride, index: 0)
-			encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+			encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 		}
 
 		encoder.endEncoding()
