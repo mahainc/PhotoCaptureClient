@@ -53,6 +53,14 @@ public struct MultiCamClient: Sendable {
 	/// Get the current display layout.
 	public var currentLayout: @Sendable () async -> Layout = { .grid(.init()) }
 
+	// MARK: - Per-Camera Zoom
+
+	/// Set the optical zoom factor for a specific camera.
+	public var setZoom: @Sendable (_ camera: CameraID, _ factor: CGFloat) async throws -> Void
+
+	/// Get the supported zoom range (min, max) for a specific camera.
+	public var zoomRange: @Sendable (_ camera: CameraID) async -> (min: CGFloat, max: CGFloat) = { _ in (1.0, 1.0) }
+
 	// MARK: - Recording
 
 	/// Start recording video from all active cameras.

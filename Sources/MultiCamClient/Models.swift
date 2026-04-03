@@ -92,15 +92,18 @@ extension MultiCamClient {
 		public var cameras: [CameraID]
 		public var preferredResolution: Resolution
 		public var frameRate: Int
+		public var includeAudio: Bool
 
 		public init(
 			cameras: [CameraID] = [.frontWide, .backWide],
 			preferredResolution: Resolution = .hd1080p,
-			frameRate: Int = 30
+			frameRate: Int = 30,
+			includeAudio: Bool = true
 		) {
 			self.cameras = cameras
 			self.preferredResolution = preferredResolution
 			self.frameRate = max(1, min(frameRate, 240))
+			self.includeAudio = includeAudio
 		}
 	}
 
@@ -274,6 +277,9 @@ extension MultiCamClient {
 
 		// Layout
 		case layoutChanged(Layout)
+
+		// Zoom
+		case zoomChanged(CameraID, CGFloat)
 
 		// System pressure
 		case systemPressureChanged(SystemPressureLevel)

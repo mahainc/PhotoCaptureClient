@@ -171,8 +171,8 @@ final class MultiCamSessionDelegate: NSObject, @unchecked Sendable {
 			throw MultiCamClient.Error.cameraSetNotSupported(config.cameras)
 		}
 
-		// Add audio
-		if let audioDevice = AVCaptureDevice.default(for: .audio) {
+		// Add audio (only if requested)
+		if config.includeAudio, let audioDevice = AVCaptureDevice.default(for: .audio) {
 			if let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
 			   session.canAddInput(audioInput) {
 				session.addInput(audioInput)
@@ -200,6 +200,26 @@ final class MultiCamSessionDelegate: NSObject, @unchecked Sendable {
 		for cam in dropped {
 			print("📹 [MULTI_CAM]:   ✗ \(cam.rawValue) (dropped)")
 		}
+	}
+
+	// MARK: - Per-Camera Zoom
+
+	func setZoom(for camera: MultiCamClient.CameraID, factor: CGFloat) throws {
+		guard let input = cameraInputs[camera] else {
+			throw MultiCamClient.Error.cameraSetNotSupported([camera])
+		}
+		let device = input.device
+		let minZoom = device.minAvailableVideoZoomFactor
+		let maxZoom = device.maxAvailableVideoZoomFactor
+		let clamped = min(max(factor, minZoom), maxZoom)
+		try device.lockForConfiguration()
+		device.videoZoomFactor = clamped
+		device.unlockForConfiguration()
+	}
+
+	func zoomRange(for camera: MultiCamClient.CameraID) -> (min: CGFloat, max: CGFloat) {
+		guard let input = cameraInputs[camera] else { return (1.0, 1.0) }
+		return (input.device.minAvailableVideoZoomFactor, input.device.maxAvailableVideoZoomFactor)
 	}
 
 	func startRunning() {

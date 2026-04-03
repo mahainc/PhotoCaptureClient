@@ -23,6 +23,12 @@ extension MultiCamClient: DependencyKey {
 			currentLayout: {
 				await actor.getLayout()
 			},
+			setZoom: { camera, factor in
+				try await actor.setZoom(camera: camera, factor: factor)
+			},
+			zoomRange: { camera in
+				await actor.zoomRange(camera: camera)
+			},
 			startRecording: { configuration in
 				try await actor.startRecording(configuration)
 			},

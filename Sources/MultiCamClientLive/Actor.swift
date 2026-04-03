@@ -239,6 +239,17 @@ actor MultiCamClientActor {
 		currentLayout
 	}
 
+	// MARK: - Zoom
+
+	func setZoom(camera: MultiCamClient.CameraID, factor: CGFloat) throws {
+		try delegate.setZoom(for: camera, factor: factor)
+		yieldEvent(.zoomChanged(camera, factor))
+	}
+
+	func zoomRange(camera: MultiCamClient.CameraID) -> (min: CGFloat, max: CGFloat) {
+		delegate.zoomRange(for: camera)
+	}
+
 	// MARK: - Recording
 
 	func startRecording(_ config: MultiCamClient.RecordingConfiguration) async throws {
