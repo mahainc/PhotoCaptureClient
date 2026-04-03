@@ -222,19 +222,24 @@ extension MultiCamClient {
 		public var videoCodec: VideoCodec
 		public var audioBitRate: Int
 		public var videoBitRate: Int
+		/// Output width in pixels. Height is derived from screen aspect ratio.
+		/// Default 1080 (1080p). Use 2160 for 4K.
+		public var outputWidth: Int
 
 		public init(
 			outputMode: OutputMode = .combined,
 			includeAudio: Bool = true,
 			videoCodec: VideoCodec = .h264,
 			audioBitRate: Int = 128_000,
-			videoBitRate: Int = 10_000_000
+			videoBitRate: Int = 10_000_000,
+			outputWidth: Int = 1080
 		) {
 			self.outputMode = outputMode
 			self.includeAudio = includeAudio
 			self.videoCodec = videoCodec
 			self.audioBitRate = audioBitRate
 			self.videoBitRate = videoBitRate
+			self.outputWidth = outputWidth
 		}
 	}
 

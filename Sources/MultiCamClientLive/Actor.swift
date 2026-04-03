@@ -285,8 +285,8 @@ actor MultiCamClientActor {
 		// Use screen aspect ratio for offscreen buffer so viewport rects map correctly
 		let screenBounds = await MainActor.run { UIScreen.main.bounds }
 		let screenAR = screenBounds.width / screenBounds.height
-		let outputWidth: CGFloat = 1080
-		let outputHeight = outputWidth / screenAR
+		let outputWidth = CGFloat(config.outputWidth)
+		let outputHeight = (outputWidth / screenAR).rounded(.toNearestOrEven)
 		let outputSize = CGSize(width: outputWidth, height: outputHeight)
 		try recordingPipeline.startRecording(
 			config: config,
