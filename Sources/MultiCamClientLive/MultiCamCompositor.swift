@@ -177,11 +177,17 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 			  let texture = CVMetalTextureGetTexture(cvTex) else { return }
 
 		let frame = CameraFrame(cvTexture: cvTex, mtlTexture: texture, width: width, height: height)
+		let shouldDispatch = _needsDraw.withLock { needsDraw -> Bool in
+			let wasClean = !needsDraw
+			needsDraw = true
+			return wasClean  // Only dispatch if transitioning from clean → dirty
+		}
 		_renderState.withLock { $0.cameraFrames[camera] = frame }
-		_needsDraw.withLock { $0 = true }
 
-		DispatchQueue.main.async { [weak self] in
-			self?.mtkView.setNeedsDisplay()
+		if shouldDispatch {
+			DispatchQueue.main.async { [weak self] in
+				self?.mtkView.setNeedsDisplay()
+			}
 		}
 	}
 
@@ -322,10 +328,8 @@ extension MultiCamCompositor: MTKViewDelegate {
 		}
 
 		encoder.endEncoding()
-		commandBuffer.present(drawable)
-		commandBuffer.commit()
 
-		// Offscreen render for recording (same scene → pixel buffer)
+		// Offscreen recording: encode into the SAME command buffer (no second GPU pass)
 		if _isRecording.withLock({ $0 }),
 		   let pool = recordingPixelBufferPool,
 		   let recCache = recordingTextureCache,
@@ -347,9 +351,8 @@ extension MultiCamCompositor: MTKViewDelegate {
 					offscreenDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
 					offscreenDescriptor.colorAttachments[0].storeAction = .store
 
-					if let offscreenCB = commandQueue.makeCommandBuffer(),
-					   let offscreenEncoder = offscreenCB.makeRenderCommandEncoder(descriptor: offscreenDescriptor) {
-
+					// Encode offscreen pass into the SAME command buffer
+					if let offscreenEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: offscreenDescriptor) {
 						let offscreenSize = CGSize(width: width, height: height)
 						for viewport in sortedViewports {
 							guard let frame = frames[viewport.cameraID] else { continue }
@@ -373,15 +376,17 @@ extension MultiCamCompositor: MTKViewDelegate {
 							offscreenEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
 						}
 						offscreenEncoder.endEncoding()
-						offscreenCB.addCompletedHandler { _ in
-							let time = CMTime(value: CMTimeValue(CACurrentMediaTime() * 1000), timescale: 1000)
-							callback(pb, time)
-						}
-						offscreenCB.commit()
+					}
+
+					commandBuffer.addCompletedHandler { _ in
+						callback(pb, CMTime(value: CMTimeValue(CACurrentMediaTime() * 1000), timescale: 1000))
 					}
 				}
 			}
 		}
+
+		commandBuffer.present(drawable)
+		commandBuffer.commit()
 	}
 }
 #endif

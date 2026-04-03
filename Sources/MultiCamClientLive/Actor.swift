@@ -28,6 +28,8 @@ actor MultiCamClientActor {
 
 	private var eventContinuations: [UUID: AsyncStream<MultiCamClient.Event>.Continuation] = [:]
 	private var pixelBufferContinuations: [MultiCamClient.CameraID: [UUID: AsyncStream<PhotoCaptureClient.PixelBufferWrapper>.Continuation]] = [:]
+	/// Atomic flag: true if any pixel buffer observers exist. Checked from capture queues without actor hop.
+	private let _hasPixelBufferObservers = OSAllocatedUnfairLock(initialState: false)
 
 	// MARK: - Init
 
@@ -163,16 +165,18 @@ actor MultiCamClientActor {
 			guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 			comp?.enqueueFrame(pixelBuffer, for: cameraID)
 
-			// Store latest frame for photo capture
+			// Store latest frame for photo capture (lightweight lock)
 			del?.storeLatestPixelBuffer(pixelBuffer, for: cameraID)
 
 			// Feed recording pipeline synchronously (before buffer is recycled)
 			pipeline.appendVideoSample(sampleBuffer, for: cameraID)
 
-			// Feed pixel buffer streams asynchronously (wrapper retains the buffer)
-			let wrapped = SendableSampleBuffer(sampleBuffer)
-			Task { [weak self] in
-				await self?.deliverPixelBuffer(cameraID: cameraID, sampleBuffer: wrapped)
+			// Feed pixel buffer streams only if observers exist (avoid per-frame Task allocation)
+			if self?._hasPixelBufferObservers.withLock({ $0 }) == true {
+				let wrapped = SendableSampleBuffer(sampleBuffer)
+				Task { [weak self] in
+					await self?.deliverPixelBuffer(cameraID: cameraID, sampleBuffer: wrapped)
+				}
 			}
 		}
 
@@ -401,6 +405,7 @@ actor MultiCamClientActor {
 				pixelBufferContinuations[camera] = [:]
 			}
 			pixelBufferContinuations[camera]?[id] = continuation
+			_hasPixelBufferObservers.withLock { $0 = true }
 			continuation.onTermination = { [weak self] _ in
 				Task { await self?.removePixelBufferContinuation(camera: camera, id: id) }
 			}
@@ -409,6 +414,9 @@ actor MultiCamClientActor {
 
 	private func removePixelBufferContinuation(camera: MultiCamClient.CameraID, id: UUID) {
 		pixelBufferContinuations[camera]?.removeValue(forKey: id)
+		// Update atomic flag
+		let hasAny = pixelBufferContinuations.values.contains { !$0.isEmpty }
+		_hasPixelBufferObservers.withLock { $0 = hasAny }
 	}
 
 	// MARK: - Internal Frame Delivery
