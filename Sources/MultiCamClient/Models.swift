@@ -9,6 +9,61 @@ import UIKit
 import AppKit
 #endif
 
+// MARK: - Aspect Ratio
+
+extension MultiCamClient {
+	public enum AspectRatio: String, Sendable, Equatable, Codable, CaseIterable {
+		case ratio9x16 = "9:16"
+		case ratio16x9 = "16:9"
+		case ratio1x1 = "1:1"
+		case ratio4x3 = "4:3"
+
+		public var label: String { rawValue }
+
+		/// Output size for a given base resolution (short edge).
+		public func outputSize(baseWidth: Int) -> (width: Int, height: Int) {
+			switch self {
+			case .ratio9x16: return (baseWidth, baseWidth * 16 / 9)
+			case .ratio16x9: return (baseWidth * 16 / 9, baseWidth)
+			case .ratio1x1:  return (baseWidth, baseWidth)
+			case .ratio4x3:  return (baseWidth, baseWidth * 4 / 3)
+			}
+		}
+	}
+}
+
+// MARK: - Layout Preset
+
+extension MultiCamClient {
+	public enum LayoutPreset: String, Sendable, Equatable, CaseIterable, Codable {
+		case equal
+		case stacked
+		case focusFirst
+		case focusLast
+		case pip
+
+		public var icon: String {
+			switch self {
+			case .equal: "rectangle.3.group"
+			case .stacked: "rectangle.grid.1x3"
+			case .focusFirst: "rectangle.leadinghalf.inset.filled"
+			case .focusLast: "rectangle.trailinghalf.inset.filled"
+			case .pip: "pip"
+			}
+		}
+
+		public var label: String {
+			switch self {
+			case .equal: "Equal"
+			case .stacked: "Stacked"
+			case .focusFirst: "Focus Left"
+			case .focusLast: "Focus Right"
+			case .pip: "PiP"
+			}
+		}
+	}
+}
+
 // MARK: - Camera Identification
 
 extension MultiCamClient {
