@@ -11,6 +11,8 @@ let package = Package(
         .singleTargetLibrary("PhotoCaptureClientLive"),
         .singleTargetLibrary("ObjectDetectionClient"),
         .singleTargetLibrary("ObjectDetectionClientLive"),
+        .singleTargetLibrary("MultiCamClient"),
+        .singleTargetLibrary("MultiCamClientLive"),
     ],
     dependencies: [
         .package(
@@ -59,6 +61,34 @@ let package = Package(
             ],
             resources: [
                 .copy("Resources/yolo11n.mlpackage"),
+            ]
+        ),
+        .target(
+            name: "MultiCamClient",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                "PhotoCaptureClient",
+            ]
+        ),
+        .target(
+            name: "MultiCamClientLive",
+            dependencies: [
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                "MultiCamClient",
+                "PhotoCaptureClient",
+            ],
+            resources: [
+                .process("Shaders.metal"),
+            ],
+            linkerSettings: [
+                .linkedFramework("Metal"),
+                .linkedFramework("MetalKit"),
+            ]
+        ),
+        .testTarget(
+            name: "MultiCamClientTests",
+            dependencies: [
+                "MultiCamClient",
             ]
         ),
         .testTarget(
