@@ -204,12 +204,7 @@ actor MultiCamClientActor {
 	}
 
 	func stopSession() async {
-		guard delegate.isRunning else {
-			logger("Session not running")
-			return
-		}
-
-		logger("Stopping multi-cam session")
+		logger("Stopping multi-cam session (isRunning=\(delegate.isRunning))")
 
 		if isRecording {
 			_ = try? await recordingPipeline.stopRecording()
@@ -219,6 +214,7 @@ actor MultiCamClientActor {
 		delegate.onVideoFrame = nil
 		delegate.onAudioSample = nil
 		compositor = nil
+		cachedPreviewView = nil
 		delegate.teardown()
 
 		for (_, continuations) in pixelBufferContinuations {
