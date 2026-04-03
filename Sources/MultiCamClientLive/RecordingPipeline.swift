@@ -40,6 +40,13 @@ final class RecordingPipeline: @unchecked Sendable {
 		var recordingStartDate: Date?
 		var pausedDuration: TimeInterval = 0
 		var pauseStartDate: Date?
+		/// Accumulated time offset from pauses — subtracted from all frame timestamps
+		/// so the writer sees continuous time with no gaps.
+		var timeOffset: CMTime = .zero
+		/// Timestamp of the last written video frame (before pause).
+		var lastWrittenTime: CMTime = .zero
+		/// Whether we need to recalculate offset on the next frame after resume.
+		var needsOffsetRecalc: Bool = false
 	}
 
 	private let state = OSAllocatedUnfairLock(initialState: State())
@@ -68,6 +75,7 @@ final class RecordingPipeline: @unchecked Sendable {
 			}
 			state.isPaused = false
 			state.pauseStartDate = nil
+			state.needsOffsetRecalc = true
 		}
 	}
 
@@ -129,12 +137,15 @@ final class RecordingPipeline: @unchecked Sendable {
 		state.withLockUnchecked { state in
 			guard state.isRecording, !state.isPaused, var writer = state.combinedWriter else { return }
 
+			// Apply same time offset as video samples
+			let adjustedTime = CMTimeSubtract(time, state.timeOffset)
+
 			if !writer.started {
 				guard writer.assetWriter.startWriting() else {
 					print("📹 [RECORDING]: Combined writer startWriting failed: \(writer.assetWriter.error?.localizedDescription ?? "unknown")")
 					return
 				}
-				writer.assetWriter.startSession(atSourceTime: time)
+				writer.assetWriter.startSession(atSourceTime: adjustedTime)
 				writer.started = true
 				state.combinedWriter = writer
 			}
@@ -142,7 +153,7 @@ final class RecordingPipeline: @unchecked Sendable {
 			guard writer.assetWriter.status == .writing,
 				  writer.videoInput.isReadyForMoreMediaData else { return }
 
-			writer.pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: time)
+			writer.pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: adjustedTime)
 		}
 	}
 
@@ -152,7 +163,17 @@ final class RecordingPipeline: @unchecked Sendable {
 		state.withLockUnchecked { state in
 			guard state.isRecording, !state.isPaused, var writer = state.cameraWriters[camera] else { return }
 
-			let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+			let rawTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+
+			// After resume: recalculate time offset from gap
+			if state.needsOffsetRecalc {
+				let gap = CMTimeSubtract(rawTime, state.lastWrittenTime)
+				state.timeOffset = CMTimeAdd(state.timeOffset, gap)
+				state.needsOffsetRecalc = false
+			}
+
+			// Adjust timestamp to remove paused gaps
+			let time = CMTimeSubtract(rawTime, state.timeOffset)
 
 			if !writer.started {
 				guard writer.assetWriter.startWriting() else {
@@ -169,6 +190,7 @@ final class RecordingPipeline: @unchecked Sendable {
 				  let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
 			writer.pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: time)
+			state.lastWrittenTime = rawTime
 		}
 	}
 
@@ -214,6 +236,9 @@ final class RecordingPipeline: @unchecked Sendable {
 			state.recordingStartDate = nil
 			state.pausedDuration = 0
 			state.pauseStartDate = nil
+			state.timeOffset = .zero
+			state.lastWrittenTime = .zero
+			state.needsOffsetRecalc = false
 			return (w, c, max(0, d))
 		}
 
