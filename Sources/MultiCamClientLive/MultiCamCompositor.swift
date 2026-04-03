@@ -8,13 +8,16 @@ import os
 
 // MARK: - Uniforms (must match Shaders.metal)
 
+/// Must match Metal struct `MultiCamUniforms` exactly (80 bytes).
 private struct MultiCamUniforms {
-	var viewportRect: SIMD4<Float>  // (x, y, width, height) in 0-1 space
-	var uvScale: SIMD2<Float>
-	var uvOffset: SIMD2<Float>
-	var cornerRadius: Float
-	var _pad1: Float
-	var _pad2: SIMD2<Float>        // Pad to 48 bytes (Metal float4 alignment)
+	var viewportRect: SIMD4<Float>     // 16 bytes
+	var uvScale: SIMD2<Float>          // 8 bytes
+	var uvOffset: SIMD2<Float>         // 8 bytes
+	var cornerRadius: Float            // 4 bytes
+	var borderWidth: Float             // 4 bytes
+	var borderColor: SIMD4<Float>      // 16 bytes
+	var pixelAspectRatio: Float        // 4 bytes
+	var _pad: SIMD3<Float>             // 12 bytes pad to 80
 }
 
 /// Wrapper to make CVMetalTexture + MTLTexture pair Sendable.
@@ -73,6 +76,10 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		get { _isRecording.withLock { $0 } }
 		set { _isRecording.withLock { $0 = newValue } }
 	}
+
+	/// Border settings for PiP overlays (set from app layer)
+	var borderWidth: Float = 0        // in normalized viewport space
+	var borderColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)  // RGBA
 
 	// MARK: - Init
 
@@ -306,6 +313,16 @@ extension MultiCamCompositor: MTKViewDelegate {
 				textureHeight: frame.height
 			)
 
+			// Apply border only to non-fullscreen viewports (PiP overlays)
+			let isFullscreen = viewport.rect.width >= 0.99 && viewport.rect.height >= 0.99
+			let bw: Float = isFullscreen ? 0 : borderWidth
+			let bc: SIMD4<Float> = isFullscreen ? .zero : borderColor
+
+			// Pixel aspect ratio: viewport pixel width / viewport pixel height
+			let vpPixelW = Float(viewport.rect.width) * Float(view.drawableSize.width)
+			let vpPixelH = Float(viewport.rect.height) * Float(view.drawableSize.height)
+			let pixelAR = vpPixelH > 0 ? vpPixelW / vpPixelH : 1.0
+
 			var uniforms = MultiCamUniforms(
 				viewportRect: SIMD4<Float>(
 					Float(viewport.rect.origin.x),
@@ -316,8 +333,10 @@ extension MultiCamCompositor: MTKViewDelegate {
 				uvScale: uvScale,
 				uvOffset: uvOffset,
 				cornerRadius: Float(viewport.cornerRadius),
-				_pad1: 0,
-				_pad2: .zero
+				borderWidth: bw,
+				borderColor: bc,
+				pixelAspectRatio: pixelAR,
+				_pad: .zero
 			)
 
 			encoder.setRenderPipelineState(cameraPipeline)
@@ -360,6 +379,10 @@ extension MultiCamCompositor: MTKViewDelegate {
 								viewportRect: viewport.rect, drawableSize: offscreenSize,
 								textureWidth: frame.width, textureHeight: frame.height
 							)
+							let isFS = viewport.rect.width >= 0.99 && viewport.rect.height >= 0.99
+							let offVpPixelW = Float(viewport.rect.width) * Float(width)
+							let offVpPixelH = Float(viewport.rect.height) * Float(height)
+							let offPixelAR = offVpPixelH > 0 ? offVpPixelW / offVpPixelH : Float(1)
 							var u = MultiCamUniforms(
 								viewportRect: SIMD4<Float>(
 									Float(viewport.rect.origin.x), Float(viewport.rect.origin.y),
@@ -367,7 +390,10 @@ extension MultiCamCompositor: MTKViewDelegate {
 								),
 								uvScale: uvS, uvOffset: uvO,
 								cornerRadius: Float(viewport.cornerRadius),
-								_pad1: 0, _pad2: .zero
+								borderWidth: isFS ? 0 : borderWidth,
+								borderColor: isFS ? .zero : borderColor,
+								pixelAspectRatio: offPixelAR,
+								_pad: .zero
 							)
 							offscreenEncoder.setRenderPipelineState(cameraPipeline)
 							offscreenEncoder.setVertexBytes(&u, length: MemoryLayout<MultiCamUniforms>.stride, index: 0)

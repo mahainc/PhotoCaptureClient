@@ -66,6 +66,12 @@ public struct MultiCamClient: Sendable {
 	/// Set stabilization mode for a specific camera.
 	public var setStabilization: @Sendable (_ camera: CameraID, _ mode: StabilizationMode) async -> Void = { _, _ in }
 
+	/// Set border style for PiP overlay cameras.
+	/// - Parameters:
+	///   - width: Border width in normalized viewport space (0 = no border, 0.02 = thin, 0.05 = thick)
+	///   - colorRGBA: Border color as (r, g, b, a) with values 0-1
+	public var setPiPBorder: @Sendable (_ width: Float, _ r: Float, _ g: Float, _ b: Float) async -> Void = { _, _, _, _ in }
+
 	// MARK: - Recording
 
 	/// Start recording video from all active cameras.

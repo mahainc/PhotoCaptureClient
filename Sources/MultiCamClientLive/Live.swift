@@ -32,6 +32,9 @@ extension MultiCamClient: DependencyKey {
 			setStabilization: { camera, mode in
 				await actor.setStabilization(camera: camera, mode: mode)
 			},
+			setPiPBorder: { width, r, g, b in
+				await actor.setPiPBorder(width: width, r: r, g: g, b: b)
+			},
 			startRecording: { configuration in
 				try await actor.startRecording(configuration)
 			},

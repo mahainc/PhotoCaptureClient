@@ -4,16 +4,19 @@ using namespace metal;
 // MARK: - Multi-Camera Uniforms
 
 /// Per-camera uniforms for viewport-based rendering.
+/// Must match Swift struct `MultiCamUniforms` exactly (64 bytes).
 struct MultiCamUniforms {
-    float4 viewportRect;   // (x, y, width, height) in normalized 0-1 space (top-left origin)
-    float2 uvScale;        // Aspect-fill UV scale
-    float2 uvOffset;       // Aspect-fill UV offset
-    float  cornerRadius;   // Corner radius as fraction (0 = sharp)
-    float  _pad1;          // Padding
-    float2 _pad2;          // Pad to 48 bytes total (float4 alignment)
+    float4 viewportRect;     // (x, y, width, height) in normalized 0-1 space
+    float2 uvScale;          // Aspect-fill UV scale
+    float2 uvOffset;         // Aspect-fill UV offset
+    float  cornerRadius;     // Corner radius as fraction (0 = sharp, 0.5 = circle)
+    float  borderWidth;      // Border width in normalized space (0 = no border)
+    float4 borderColor;      // Border RGBA color
+    float  pixelAspectRatio; // Viewport pixel width / pixel height
+    float3 _pad;             // Pad to 80 bytes (float4 alignment)
 };
 
-// MARK: - Camera Frame Rendering (quad — 4 vertices as triangle strip)
+// MARK: - Camera Frame Rendering
 
 struct CameraVertexOut {
     float4 position [[position]];
@@ -21,12 +24,10 @@ struct CameraVertexOut {
     float2 normalizedPos;  // Position within the viewport (0-1)
 };
 
-/// Renders a camera texture into a viewport rect using a quad (triangle strip, 4 vertices).
 vertex CameraVertexOut multiCamVertex(uint vertexID [[vertex_id]],
                                        constant MultiCamUniforms& uniforms [[buffer(0)]]) {
     CameraVertexOut out;
 
-    // Quad corners as triangle strip: TL, TR, BL, BR
     float2 corners[4] = {
         float2(0.0, 0.0),
         float2(1.0, 0.0),
@@ -36,7 +37,6 @@ vertex CameraVertexOut multiCamVertex(uint vertexID [[vertex_id]],
 
     float2 pos = corners[vertexID];
 
-    // Map to viewport rect in clip space (-1 to 1, bottom-left origin)
     float2 vpOrigin = uniforms.viewportRect.xy;
     float2 vpSize = uniforms.viewportRect.zw;
 
@@ -44,8 +44,6 @@ vertex CameraVertexOut multiCamVertex(uint vertexID [[vertex_id]],
     float clipY = 1.0 - (vpOrigin.y + pos.y * vpSize.y) * 2.0;
 
     out.position = float4(clipX, clipY, 0.0, 1.0);
-
-    // Texture coordinates with aspect-fill
     out.texCoord = pos * uniforms.uvScale + uniforms.uvOffset;
     out.normalizedPos = pos;
 
@@ -58,25 +56,56 @@ fragment float4 multiCamFragment(CameraVertexOut in [[stage_in]],
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear,
                                   address::clamp_to_edge);
 
-    // Rounded rectangle SDF with correct inner-region handling
     float cornerRadius = uniforms.cornerRadius;
-    if (cornerRadius > 0.0) {
-        float2 p = in.normalizedPos;
-        float2 center = float2(0.5, 0.5);
-        float2 halfSize = float2(0.5, 0.5);
+    float borderWidth = uniforms.borderWidth;
+    float2 p = in.normalizedPos;
 
-        // Scale corner radius by viewport aspect ratio for circular corners
-        float vpAspect = uniforms.viewportRect.z / uniforms.viewportRect.w;
-        float2 radius = float2(cornerRadius, cornerRadius * vpAspect);
-        radius = min(radius, halfSize); // clamp to half-size
+    // Compute distance from rounded rectangle edge in PIXEL space
+    // Convert normalized position (0-1) to pixel coordinates within viewport
+    float pixelAR = uniforms.pixelAspectRatio;
+    float vpPixelW = uniforms.viewportRect.z * 1000.0; // arbitrary scale, ratio matters
+    float vpPixelH = vpPixelW / pixelAR;
 
-        float2 d = abs(p - center) - (halfSize - radius);
-        // Full SDF: distance outside + distance inside (for correct flat edges)
-        float dist = length(max(d, 0.0)) + min(max(d.x / radius.x, d.y / radius.y), 0.0) * min(radius.x, radius.y) - min(radius.x, radius.y);
+    float2 pixelPos = float2(p.x * vpPixelW, p.y * vpPixelH);
+    float2 pixelCenter = float2(vpPixelW * 0.5, vpPixelH * 0.5);
+    float2 pixelHalfSize = float2(vpPixelW * 0.5, vpPixelH * 0.5);
 
-        if (dist > 0.0) {
-            discard_fragment();
+    // Corner radius in pixels: fraction of the smaller dimension
+    float minDim = min(vpPixelW, vpPixelH);
+    float radiusPixels = cornerRadius * minDim;
+
+    float dist = 0.0;
+    bool hasCornerRadius = cornerRadius > 0.0;
+
+    if (hasCornerRadius) {
+        float r = min(radiusPixels, minDim * 0.5);
+        float2 d = abs(pixelPos - pixelCenter) - (pixelHalfSize - r);
+        dist = length(max(d, 0.0)) - r;
+        dist += min(max(d.x, d.y), 0.0);
+    } else {
+        float edgeDist = min(min(p.x, 1.0 - p.x), min(p.y, 1.0 - p.y));
+        dist = -edgeDist * minDim; // scale to pixel space
+    }
+
+    // Outside shape — discard
+    if (dist > 0.5) {  // half-pixel tolerance for anti-aliasing
+        discard_fragment();
+    }
+
+    // Anti-alias the edge
+    if (dist > -0.5) {
+        float4 texColor = cameraTexture.sample(texSampler, in.texCoord);
+        float alpha = 1.0 - smoothstep(-0.5, 0.5, dist);
+        if (borderWidth > 0.0) {
+            return float4(uniforms.borderColor.rgb, alpha);
         }
+        return float4(texColor.rgb, alpha * texColor.a);
+    }
+
+    // Border: solid color for pixels within borderWidth (in pixels) of the edge
+    float borderPixels = borderWidth * min(vpPixelW, vpPixelH);
+    if (borderPixels > 0.0 && dist > -borderPixels) {
+        return uniforms.borderColor;
     }
 
     return cameraTexture.sample(texSampler, in.texCoord);

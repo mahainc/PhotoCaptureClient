@@ -249,6 +249,14 @@ actor MultiCamClientActor {
 
 	// MARK: - Zoom
 
+	func setPiPBorder(width: Float, r: Float, g: Float, b: Float) async {
+		let comp = compositor
+		await MainActor.run {
+			comp?.borderWidth = width
+			comp?.borderColor = SIMD4<Float>(r, g, b, 1.0)
+		}
+	}
+
 	func setStabilization(camera: MultiCamClient.CameraID, mode: MultiCamClient.StabilizationMode) {
 		delegate.setStabilization(for: camera, mode: mode)
 		logger("Stabilization set to \(mode.rawValue) for \(camera.rawValue)")
@@ -276,7 +284,12 @@ actor MultiCamClientActor {
 			throw MultiCamClient.Error.recordingAlreadyInProgress
 		}
 
-		let outputSize = CGSize(width: 1080, height: 1920) // Portrait 1080p
+		// Use screen aspect ratio for offscreen buffer so viewport rects map correctly
+		let screenBounds = await MainActor.run { UIScreen.main.bounds }
+		let screenAR = screenBounds.width / screenBounds.height
+		let outputWidth: CGFloat = 1080
+		let outputHeight = outputWidth / screenAR
+		let outputSize = CGSize(width: outputWidth, height: outputHeight)
 		try recordingPipeline.startRecording(
 			config: config,
 			cameras: activeCameras,
