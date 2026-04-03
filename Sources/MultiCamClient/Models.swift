@@ -107,9 +107,12 @@ extension MultiCamClient {
 	public struct CustomLayout: Sendable, Equatable {
 		/// Per-camera normalized frame (origin + size in 0-1 space).
 		public var frames: [CameraID: CGRect]
+		/// Per-camera corner radius (0 = sharp, 0.5 = circular).
+		public var cornerRadii: [CameraID: CGFloat]
 
-		public init(frames: [CameraID: CGRect]) {
+		public init(frames: [CameraID: CGRect], cornerRadii: [CameraID: CGFloat] = [:]) {
 			self.frames = frames
+			self.cornerRadii = cornerRadii
 		}
 	}
 }

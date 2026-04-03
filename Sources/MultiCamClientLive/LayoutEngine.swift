@@ -135,7 +135,7 @@ struct LayoutEngine: Sendable {
 				cameraID: cameraID,
 				rect: rect,
 				zOrder: index,
-				cornerRadius: 0
+				cornerRadius: custom.cornerRadii[cameraID] ?? 0
 			)
 		}
 	}
