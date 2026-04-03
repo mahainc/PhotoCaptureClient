@@ -50,6 +50,9 @@ extension MultiCamClient: DependencyKey {
 			capturePhoto: { camera in
 				try await actor.capturePhoto(camera: camera)
 			},
+			captureCompositePhoto: { outputSize in
+				try await actor.captureCompositePhoto(outputSize: outputSize)
+			},
 			requestAuthorization: {
 				await actor.requestAuthorization()
 			},

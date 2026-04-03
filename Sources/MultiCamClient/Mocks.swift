@@ -64,6 +64,7 @@ extension MultiCamClient {
 		resumeRecording: {},
 		stopRecording: { RecordingResult() },
 		capturePhoto: { _ in PhotoCaptureClient.Photo() },
+		captureCompositePhoto: { _ in CompositePhotoCaptureResult() },
 		requestAuthorization: { .authorized },
 		authorizationStatus: { .authorized },
 		events: { AsyncStream { _ in } },
@@ -119,6 +120,16 @@ extension MultiCamClient {
 				timestamp: .now
 			)
 		},
+		captureCompositePhoto: { _ in
+			CompositePhotoCaptureResult(
+				combinedPhoto: PhotoCaptureClient.Photo(
+					fileDataRepresentation: Data(repeating: 0xFF, count: 2048),
+					photoDimensions: CGSize(width: 1080, height: 1920),
+					timestamp: .now
+				),
+				individualPhotos: [:]
+			)
+		},
 		requestAuthorization: { .authorized },
 		authorizationStatus: { .authorized },
 		events: {
@@ -160,6 +171,7 @@ extension MultiCamClient {
 			throw MultiCamClient.Error.recordingNotInProgress
 		},
 		capturePhoto: { _ in throw MultiCamClient.Error.sessionNotRunning },
+		captureCompositePhoto: { _ in throw MultiCamClient.Error.sessionNotRunning },
 		requestAuthorization: { .denied },
 		authorizationStatus: { .denied },
 		events: {

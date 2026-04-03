@@ -343,6 +343,31 @@ actor MultiCamClientActor {
 		return photo
 	}
 
+	func captureCompositePhoto(outputSize: CGSize) async throws -> MultiCamClient.CompositePhotoCaptureResult {
+		guard delegate.isRunning else {
+			throw MultiCamClient.Error.sessionNotRunning
+		}
+
+		// 1. Composite photo from Metal compositor
+		let comp = compositor
+		let combinedPhoto: PhotoCaptureClient.Photo? = await MainActor.run {
+			comp?.captureCompositePhoto(outputSize: outputSize)
+		}
+
+		// 2. Individual per-camera photos
+		var individualPhotos: [MultiCamClient.CameraID: PhotoCaptureClient.Photo] = [:]
+		for camera in activeCameras {
+			if let photo = delegate.capturePhoto(for: camera) {
+				individualPhotos[camera] = photo
+			}
+		}
+
+		return MultiCamClient.CompositePhotoCaptureResult(
+			combinedPhoto: combinedPhoto,
+			individualPhotos: individualPhotos
+		)
+	}
+
 	func stopRecording() async throws -> MultiCamClient.RecordingResult {
 		guard isRecording else {
 			throw MultiCamClient.Error.recordingNotInProgress

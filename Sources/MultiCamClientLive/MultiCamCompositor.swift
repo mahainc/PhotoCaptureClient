@@ -242,6 +242,102 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		recordingTextureCache = cache
 	}
 
+	// MARK: - One-Shot Composite Photo Capture
+
+	/// Renders all current camera frames into a single composited image matching the preview layout.
+	/// Must be called on the main thread (UIView subclass).
+	func captureCompositePhoto(outputSize: CGSize) -> PhotoCaptureClient.Photo? {
+		let width = Int(outputSize.width)
+		let height = Int(outputSize.height)
+		guard width > 0 && height > 0 else { return nil }
+
+		let (frames, viewports) = _renderState.withLock { ($0.cameraFrames, $0.viewports) }
+		guard !frames.isEmpty, !viewports.isEmpty else { return nil }
+
+		// Allocate a one-shot pixel buffer
+		let attrs: [String: Any] = [
+			kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+			kCVPixelBufferWidthKey as String: width,
+			kCVPixelBufferHeightKey as String: height,
+			kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+			kCVPixelBufferMetalCompatibilityKey as String: true,
+		]
+		var pixelBuffer: CVPixelBuffer?
+		let pbStatus = CVPixelBufferCreate(kCFAllocatorDefault, width, height, kCVPixelFormatType_32BGRA, attrs as CFDictionary, &pixelBuffer)
+		guard pbStatus == kCVReturnSuccess, let pb = pixelBuffer else { return nil }
+
+		// Create Metal texture from pixel buffer
+		var texCache: CVMetalTextureCache?
+		CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &texCache)
+		guard let cache = texCache else { return nil }
+
+		var cvTexture: CVMetalTexture?
+		let texStatus = CVMetalTextureCacheCreateTextureFromImage(
+			kCFAllocatorDefault, cache, pb, nil, .bgra8Unorm, width, height, 0, &cvTexture
+		)
+		guard texStatus == kCVReturnSuccess, let cvTex = cvTexture, let offscreenTexture = CVMetalTextureGetTexture(cvTex) else { return nil }
+
+		// Render
+		let descriptor = MTLRenderPassDescriptor()
+		descriptor.colorAttachments[0].texture = offscreenTexture
+		descriptor.colorAttachments[0].loadAction = .clear
+		descriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+		descriptor.colorAttachments[0].storeAction = .store
+
+		guard let commandBuffer = commandQueue.makeCommandBuffer(),
+			  let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: descriptor) else { return nil }
+
+		let sortedViewports = viewports.sorted { $0.zOrder < $1.zOrder }
+		let offscreenSize = CGSize(width: width, height: height)
+
+		for viewport in sortedViewports {
+			guard let frame = frames[viewport.cameraID] else { continue }
+			let (uvS, uvO) = computeAspectFill(
+				viewportRect: viewport.rect, drawableSize: offscreenSize,
+				textureWidth: frame.width, textureHeight: frame.height
+			)
+			let isFS = viewport.rect.width >= 0.99 && viewport.rect.height >= 0.99
+			let vpPxW = Float(viewport.rect.width) * Float(width)
+			let vpPxH = Float(viewport.rect.height) * Float(height)
+			let pxAR = vpPxH > 0 ? vpPxW / vpPxH : Float(1)
+			var u = MultiCamUniforms(
+				viewportRect: SIMD4<Float>(
+					Float(viewport.rect.origin.x), Float(viewport.rect.origin.y),
+					Float(viewport.rect.size.width), Float(viewport.rect.size.height)
+				),
+				uvScale: uvS, uvOffset: uvO,
+				cornerRadius: Float(viewport.cornerRadius),
+				borderWidth: isFS ? 0 : borderWidth,
+				borderColor: isFS ? .zero : borderColor,
+				pixelAspectRatio: pxAR,
+				_pad: .zero
+			)
+			encoder.setRenderPipelineState(cameraPipeline)
+			encoder.setVertexBytes(&u, length: MemoryLayout<MultiCamUniforms>.stride, index: 0)
+			encoder.setFragmentTexture(frame.mtlTexture, index: 0)
+			encoder.setFragmentBytes(&u, length: MemoryLayout<MultiCamUniforms>.stride, index: 0)
+			encoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+		}
+
+		encoder.endEncoding()
+		commandBuffer.commit()
+		commandBuffer.waitUntilCompleted()
+
+		// Convert pixel buffer → JPEG
+		let ciImage = CIImage(cvPixelBuffer: pb)
+		let context = CIContext()
+		guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+		let uiImage = UIImage(cgImage: cgImage)
+		guard let jpegData = uiImage.jpegData(compressionQuality: 0.92) else { return nil }
+
+		return PhotoCaptureClient.Photo(
+			fileDataRepresentation: jpegData,
+			photoDimensions: outputSize,
+			timestamp: .now,
+			isRawPhoto: false
+		)
+	}
+
 	// MARK: - Aspect-Fill for a Viewport
 
 	private func computeAspectFill(

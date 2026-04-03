@@ -276,6 +276,26 @@ extension MultiCamClient {
 	}
 }
 
+// MARK: - Composite Photo Capture Result
+
+extension MultiCamClient {
+	public struct CompositePhotoCaptureResult: Sendable, Equatable {
+		public let combinedPhoto: PhotoCaptureClient.Photo?
+		public let individualPhotos: [CameraID: PhotoCaptureClient.Photo]
+		public let timestamp: Date
+
+		public init(
+			combinedPhoto: PhotoCaptureClient.Photo? = nil,
+			individualPhotos: [CameraID: PhotoCaptureClient.Photo] = [:],
+			timestamp: Date = .now
+		) {
+			self.combinedPhoto = combinedPhoto
+			self.individualPhotos = individualPhotos
+			self.timestamp = timestamp
+		}
+	}
+}
+
 // MARK: - Event
 
 extension MultiCamClient {

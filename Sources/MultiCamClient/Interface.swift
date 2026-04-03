@@ -92,6 +92,9 @@ public struct MultiCamClient: Sendable {
 	/// Works during recording as well.
 	public var capturePhoto: @Sendable (_ camera: CameraID) async throws -> PhotoCaptureClient.Photo
 
+	/// Capture a composite photo (all cameras rendered with current layout) plus individual per-camera photos.
+	public var captureCompositePhoto: @Sendable (_ outputSize: CGSize) async throws -> CompositePhotoCaptureResult
+
 	// MARK: - Authorization
 
 	/// Request camera and microphone authorization.
