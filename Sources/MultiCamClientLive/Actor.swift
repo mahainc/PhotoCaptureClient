@@ -147,8 +147,10 @@ actor MultiCamClientActor {
 		let layout = currentLayout
 		let comp = await MainActor.run {
 			let c = MultiCamCompositor.create()
-			c?.setCameras(actualCameras)
+			// setLayout first (may override _cameras for stale custom layouts),
+			// then setCameras to restore the correct camera list and recompute viewports.
 			c?.setLayout(layout)
+			c?.setCameras(actualCameras)
 			return c
 		}
 		self.compositor = comp
