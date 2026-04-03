@@ -66,8 +66,20 @@ public struct MultiCamClient: Sendable {
 	/// Start recording video from all active cameras.
 	public var startRecording: @Sendable (_ configuration: RecordingConfiguration) async throws -> Void
 
+	/// Pause the current recording. Frames are not written while paused.
+	public var pauseRecording: @Sendable () async -> Void = {}
+
+	/// Resume a paused recording.
+	public var resumeRecording: @Sendable () async -> Void = {}
+
 	/// Stop recording and return the result with file URLs.
 	public var stopRecording: @Sendable () async throws -> RecordingResult
+
+	// MARK: - Photo Capture
+
+	/// Capture a photo from a specific camera while the session is running.
+	/// Works during recording as well.
+	public var capturePhoto: @Sendable (_ camera: CameraID) async throws -> PhotoCaptureClient.Photo
 
 	// MARK: - Authorization
 

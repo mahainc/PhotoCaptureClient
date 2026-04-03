@@ -272,8 +272,13 @@ extension MultiCamClient {
 
 		// Recording lifecycle
 		case recordingStarted
+		case recordingPaused
+		case recordingResumed
 		case recordingStopped(RecordingResult)
 		case recordingError(String)
+
+		// Photo capture
+		case photoCaptured(CameraID)
 
 		// Layout
 		case layoutChanged(Layout)

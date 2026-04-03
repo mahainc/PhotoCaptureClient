@@ -158,9 +158,13 @@ actor MultiCamClientActor {
 		// Recording pipeline is called SYNCHRONOUSLY here to ensure CMSampleBuffer
 		// is still valid (AVFoundation recycles buffers after the delegate returns).
 		let pipeline = recordingPipeline
-		delegate.onVideoFrame = { [weak self, weak comp] cameraID, sampleBuffer in
+		let del = delegate
+		delegate.onVideoFrame = { [weak self, weak comp, weak del] cameraID, sampleBuffer in
 			guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 			comp?.enqueueFrame(pixelBuffer, for: cameraID)
+
+			// Store latest frame for photo capture
+			del?.storeLatestPixelBuffer(pixelBuffer, for: cameraID)
 
 			// Feed recording pipeline synchronously (before buffer is recycled)
 			pipeline.appendVideoSample(sampleBuffer, for: cameraID)
@@ -284,6 +288,35 @@ actor MultiCamClientActor {
 		isRecording = true
 		yieldEvent(.recordingStarted)
 		logger("Recording started (with real-time compositing)")
+	}
+
+	func pauseRecording() async {
+		guard isRecording else { return }
+		recordingPipeline.pause()
+		let comp = compositor
+		await MainActor.run { comp?.isRecording = false }
+		yieldEvent(.recordingPaused)
+		logger("Recording paused")
+	}
+
+	func resumeRecording() async {
+		guard isRecording else { return }
+		recordingPipeline.resume()
+		let comp = compositor
+		await MainActor.run { comp?.isRecording = true }
+		yieldEvent(.recordingResumed)
+		logger("Recording resumed")
+	}
+
+	func capturePhoto(camera: MultiCamClient.CameraID) throws -> PhotoCaptureClient.Photo {
+		guard delegate.isRunning else {
+			throw MultiCamClient.Error.sessionNotRunning
+		}
+		guard let photo = delegate.capturePhoto(for: camera) else {
+			throw MultiCamClient.Error.cameraSetNotSupported([camera])
+		}
+		yieldEvent(.photoCaptured(camera))
+		return photo
 	}
 
 	func stopRecording() async throws -> MultiCamClient.RecordingResult {

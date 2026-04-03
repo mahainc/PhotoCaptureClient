@@ -36,13 +36,39 @@ final class RecordingPipeline: @unchecked Sendable {
 		var cameraWriters: [MultiCamClient.CameraID: CameraWriter] = [:]
 		var combinedWriter: CombinedWriter?
 		var isRecording: Bool = false
+		var isPaused: Bool = false
 		var recordingStartDate: Date?
+		var pausedDuration: TimeInterval = 0
+		var pauseStartDate: Date?
 	}
 
 	private let state = OSAllocatedUnfairLock(initialState: State())
 
 	var isRecording: Bool {
 		state.withLock { $0.isRecording }
+	}
+
+	var isPaused: Bool {
+		state.withLock { $0.isPaused }
+	}
+
+	func pause() {
+		state.withLock { state in
+			guard state.isRecording, !state.isPaused else { return }
+			state.isPaused = true
+			state.pauseStartDate = Date()
+		}
+	}
+
+	func resume() {
+		state.withLock { state in
+			guard state.isRecording, state.isPaused else { return }
+			if let pauseStart = state.pauseStartDate {
+				state.pausedDuration += Date().timeIntervalSince(pauseStart)
+			}
+			state.isPaused = false
+			state.pauseStartDate = nil
+		}
 	}
 
 	// MARK: - Start Recording
@@ -101,7 +127,7 @@ final class RecordingPipeline: @unchecked Sendable {
 
 	func appendComposedFrame(_ pixelBuffer: CVPixelBuffer, at time: CMTime) {
 		state.withLockUnchecked { state in
-			guard state.isRecording, var writer = state.combinedWriter else { return }
+			guard state.isRecording, !state.isPaused, var writer = state.combinedWriter else { return }
 
 			if !writer.started {
 				guard writer.assetWriter.startWriting() else {
@@ -124,7 +150,7 @@ final class RecordingPipeline: @unchecked Sendable {
 
 	func appendVideoSample(_ sampleBuffer: CMSampleBuffer, for camera: MultiCamClient.CameraID) {
 		state.withLockUnchecked { state in
-			guard state.isRecording, var writer = state.cameraWriters[camera] else { return }
+			guard state.isRecording, !state.isPaused, var writer = state.cameraWriters[camera] else { return }
 
 			let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
@@ -148,7 +174,7 @@ final class RecordingPipeline: @unchecked Sendable {
 
 	func appendAudioSample(_ sampleBuffer: CMSampleBuffer) {
 		state.withLockUnchecked { state in
-			guard state.isRecording else { return }
+			guard state.isRecording, !state.isPaused else { return }
 			// Feed per-camera writers
 			for (_, writer) in state.cameraWriters {
 				guard writer.started,
@@ -175,13 +201,20 @@ final class RecordingPipeline: @unchecked Sendable {
 		let (writers, combined, duration) = state.withLock { state -> ([CameraWriter], CombinedWriter?, TimeInterval) in
 			guard state.isRecording else { return ([], nil, 0) }
 			state.isRecording = false
-			let d = -(state.recordingStartDate?.timeIntervalSinceNow ?? 0)
+			state.isPaused = false
+			var totalPaused = state.pausedDuration
+			if let pauseStart = state.pauseStartDate {
+				totalPaused += Date().timeIntervalSince(pauseStart)
+			}
+			let d = -(state.recordingStartDate?.timeIntervalSinceNow ?? 0) - totalPaused
 			let w = Array(state.cameraWriters.values)
 			let c = state.combinedWriter
 			state.cameraWriters.removeAll()
 			state.combinedWriter = nil
 			state.recordingStartDate = nil
-			return (w, c, d)
+			state.pausedDuration = 0
+			state.pauseStartDate = nil
+			return (w, c, max(0, d))
 		}
 
 		guard !writers.isEmpty else {

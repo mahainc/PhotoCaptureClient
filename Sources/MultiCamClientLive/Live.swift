@@ -32,8 +32,17 @@ extension MultiCamClient: DependencyKey {
 			startRecording: { configuration in
 				try await actor.startRecording(configuration)
 			},
+			pauseRecording: {
+				await actor.pauseRecording()
+			},
+			resumeRecording: {
+				await actor.resumeRecording()
+			},
 			stopRecording: {
 				try await actor.stopRecording()
+			},
+			capturePhoto: { camera in
+				try await actor.capturePhoto(camera: camera)
 			},
 			requestAuthorization: {
 				await actor.requestAuthorization()

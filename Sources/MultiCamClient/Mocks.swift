@@ -58,7 +58,10 @@ extension MultiCamClient {
 		setZoom: { _, _ in },
 		zoomRange: { _ in (1.0, 10.0) },
 		startRecording: { _ in },
+		pauseRecording: {},
+		resumeRecording: {},
 		stopRecording: { RecordingResult() },
+		capturePhoto: { _ in PhotoCaptureClient.Photo() },
 		requestAuthorization: { .authorized },
 		authorizationStatus: { .authorized },
 		events: { AsyncStream { _ in } },
@@ -90,6 +93,8 @@ extension MultiCamClient {
 		startRecording: { _ in
 			try await Task.sleep(nanoseconds: MockConstants.shortDelayNanoseconds)
 		},
+		pauseRecording: {},
+		resumeRecording: {},
 		stopRecording: {
 			try await Task.sleep(nanoseconds: MockConstants.recordingDelayNanoseconds)
 			let tempDir = FileManager.default.temporaryDirectory
@@ -100,6 +105,13 @@ extension MultiCamClient {
 					.backWide: tempDir.appendingPathComponent("mock-back.mp4"),
 				],
 				duration: 15.0,
+				timestamp: .now
+			)
+		},
+		capturePhoto: { _ in
+			PhotoCaptureClient.Photo(
+				fileDataRepresentation: Data(repeating: 0xFF, count: 1024),
+				photoDimensions: CGSize(width: 1920, height: 1080),
 				timestamp: .now
 			)
 		},
@@ -136,9 +148,12 @@ extension MultiCamClient {
 		startRecording: { _ in
 			throw MultiCamClient.Error.sessionNotRunning
 		},
+		pauseRecording: {},
+		resumeRecording: {},
 		stopRecording: {
 			throw MultiCamClient.Error.recordingNotInProgress
 		},
+		capturePhoto: { _ in throw MultiCamClient.Error.sessionNotRunning },
 		requestAuthorization: { .denied },
 		authorizationStatus: { .denied },
 		events: {
