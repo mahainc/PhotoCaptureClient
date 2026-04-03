@@ -171,14 +171,17 @@ public enum VideoExporter {
 		try? FileManager.default.removeItem(at: outputURL)
 
 		guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
-			return url
+			throw MultiCamClient.Error.exportFailed("Failed to create export session for crop")
 		}
 		session.outputURL = outputURL
 		session.outputFileType = .mp4
 		session.videoComposition = videoComposition
 		await session.export()
 
-		return session.status == .completed ? outputURL : url
+		guard session.status == .completed else {
+			throw session.error ?? MultiCamClient.Error.exportFailed("Crop export failed")
+		}
+		return outputURL
 	}
 }
 #endif

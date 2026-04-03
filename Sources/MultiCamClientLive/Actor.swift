@@ -150,6 +150,9 @@ actor MultiCamClientActor {
 			return c
 		}
 		self.compositor = comp
+		if comp == nil {
+			yieldEvent(.sessionError("Metal compositor unavailable — preview disabled"))
+		}
 
 		// Wire delegate → compositor + recording pipeline + pixel buffer streams
 		// Recording pipeline is called SYNCHRONOUSLY here to ensure CMSampleBuffer
@@ -293,16 +296,20 @@ actor MultiCamClientActor {
 
 	// MARK: - Preview
 
-	func getPreviewView() -> MultiCamClient.PreviewView {
+	func getPreviewView() async -> MultiCamClient.PreviewView {
 		if let cached = cachedPreviewView {
 			return cached
 		}
-		let preview: MultiCamClient.PreviewView
-		if let comp = compositor {
-			preview = MultiCamClient.PreviewView(view: comp, layout: currentLayout)
-			comp.previewViewRef = preview
-		} else {
-			preview = MultiCamClient.PreviewView(view: UIView(), layout: currentLayout)
+		let comp = compositor
+		let layout = currentLayout
+		let preview = await MainActor.run {
+			if let comp {
+				let pv = MultiCamClient.PreviewView(view: comp, layout: layout)
+				comp.previewViewRef = pv
+				return pv
+			} else {
+				return MultiCamClient.PreviewView(view: UIView(), layout: layout)
+			}
 		}
 		cachedPreviewView = preview
 		return preview

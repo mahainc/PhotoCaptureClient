@@ -108,6 +108,7 @@ extension MultiCamClient {
 					continuation.yield(.sessionStarted)
 					continuation.yield(.cameraConnected(.frontWide))
 					continuation.yield(.cameraConnected(.backWide))
+					continuation.finish()
 				}
 			}
 		},

@@ -100,7 +100,7 @@ extension MultiCamClient {
 		) {
 			self.cameras = cameras
 			self.preferredResolution = preferredResolution
-			self.frameRate = frameRate
+			self.frameRate = max(1, min(frameRate, 240))
 		}
 	}
 
@@ -108,6 +108,22 @@ extension MultiCamClient {
 		case hd720p
 		case hd1080p
 		case uhd4K
+
+		public var width: Int {
+			switch self {
+			case .hd720p: 1280
+			case .hd1080p: 1920
+			case .uhd4K: 3840
+			}
+		}
+
+		public var height: Int {
+			switch self {
+			case .hd720p: 720
+			case .hd1080p: 1080
+			case .uhd4K: 2160
+			}
+		}
 	}
 }
 
@@ -244,6 +260,8 @@ extension MultiCamClient {
 		case sessionStarted
 		case sessionStopped
 		case sessionError(String)
+		case sessionInterrupted(String)
+		case sessionInterruptionEnded
 
 		// Camera lifecycle
 		case cameraConnected(CameraID)

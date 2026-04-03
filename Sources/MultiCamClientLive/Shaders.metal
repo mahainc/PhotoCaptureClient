@@ -22,20 +22,16 @@ struct CameraVertexOut {
 };
 
 /// Renders a camera texture into a viewport rect using a quad (triangle strip, 4 vertices).
-/// vertexID 0-3 maps to the 4 corners of the viewport rectangle.
 vertex CameraVertexOut multiCamVertex(uint vertexID [[vertex_id]],
                                        constant MultiCamUniforms& uniforms [[buffer(0)]]) {
     CameraVertexOut out;
 
     // Quad corners as triangle strip: TL, TR, BL, BR
-    //   0---1
-    //   | / |
-    //   2---3
     float2 corners[4] = {
-        float2(0.0, 0.0),  // top-left
-        float2(1.0, 0.0),  // top-right
-        float2(0.0, 1.0),  // bottom-left
-        float2(1.0, 1.0),  // bottom-right
+        float2(0.0, 0.0),
+        float2(1.0, 0.0),
+        float2(0.0, 1.0),
+        float2(1.0, 1.0),
     };
 
     float2 pos = corners[vertexID];
@@ -62,40 +58,26 @@ fragment float4 multiCamFragment(CameraVertexOut in [[stage_in]],
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear,
                                   address::clamp_to_edge);
 
-    // Corner radius masking
+    // Rounded rectangle SDF with correct inner-region handling
     float cornerRadius = uniforms.cornerRadius;
     if (cornerRadius > 0.0) {
         float2 p = in.normalizedPos;
+        float2 center = float2(0.5, 0.5);
         float2 halfSize = float2(0.5, 0.5);
-        float2 d = abs(p - halfSize) - (halfSize - cornerRadius);
-        float dist = length(max(d, 0.0)) - cornerRadius;
+
+        // Scale corner radius by viewport aspect ratio for circular corners
+        float vpAspect = uniforms.viewportRect.z / uniforms.viewportRect.w;
+        float2 radius = float2(cornerRadius, cornerRadius * vpAspect);
+        radius = min(radius, halfSize); // clamp to half-size
+
+        float2 d = abs(p - center) - (halfSize - radius);
+        // Full SDF: distance outside + distance inside (for correct flat edges)
+        float dist = length(max(d, 0.0)) + min(max(d.x / radius.x, d.y / radius.y), 0.0) * min(radius.x, radius.y) - min(radius.x, radius.y);
+
         if (dist > 0.0) {
             discard_fragment();
         }
     }
 
     return cameraTexture.sample(texSampler, in.texCoord);
-}
-
-// MARK: - Background Fill
-
-struct FillVertexOut {
-    float4 position [[position]];
-};
-
-vertex FillVertexOut fillVertex(uint vertexID [[vertex_id]]) {
-    FillVertexOut out;
-    float2 corners[4] = {
-        float2(0.0, 0.0),
-        float2(1.0, 0.0),
-        float2(0.0, 1.0),
-        float2(1.0, 1.0),
-    };
-    float2 pos = corners[vertexID];
-    out.position = float4(pos * 2.0 - 1.0, 0.0, 1.0);
-    return out;
-}
-
-fragment float4 fillFragment(FillVertexOut in [[stage_in]]) {
-    return float4(0.0, 0.0, 0.0, 1.0); // Black background
 }

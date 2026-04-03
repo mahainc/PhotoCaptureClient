@@ -17,6 +17,7 @@ final class RecordingPipeline: @unchecked Sendable {
 		let assetWriter: AVAssetWriter
 		let videoInput: AVAssetWriterInput
 		let pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor
+		let audioInput: AVAssetWriterInput?
 		let cameraID: MultiCamClient.CameraID
 		var started: Bool = false
 	}
@@ -56,12 +57,14 @@ final class RecordingPipeline: @unchecked Sendable {
 					url: url,
 					size: outputSize,
 					codec: config.videoCodec,
-					bitRate: config.videoBitRate
+					bitRate: config.videoBitRate,
+					includeAudio: config.includeAudio
 				)
 				state.cameraWriters[camera] = CameraWriter(
 					assetWriter: writer.writer,
 					videoInput: writer.videoInput,
 					pixelBufferAdaptor: writer.adaptor,
+					audioInput: writer.audioInput,
 					cameraID: camera
 				)
 			}
@@ -80,7 +83,10 @@ final class RecordingPipeline: @unchecked Sendable {
 			let time = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
 
 			if !writer.started {
-				writer.assetWriter.startWriting()
+				guard writer.assetWriter.startWriting() else {
+					print("📹 [RECORDING]: startWriting failed for \(camera.rawValue): \(writer.assetWriter.error?.localizedDescription ?? "unknown")")
+					return
+				}
 				writer.assetWriter.startSession(atSourceTime: time)
 				writer.started = true
 				state.cameraWriters[camera] = writer
@@ -95,8 +101,16 @@ final class RecordingPipeline: @unchecked Sendable {
 	}
 
 	func appendAudioSample(_ sampleBuffer: CMSampleBuffer) {
-		// Currently individual writers don't have audio inputs.
-		// Audio support can be added later.
+		state.withLockUnchecked { state in
+			guard state.isRecording else { return }
+			for (_, writer) in state.cameraWriters {
+				guard writer.started,
+					  writer.assetWriter.status == .writing,
+					  let audioInput = writer.audioInput,
+					  audioInput.isReadyForMoreMediaData else { continue }
+				audioInput.append(sampleBuffer)
+			}
+		}
 	}
 
 	// MARK: - Stop Recording
@@ -123,6 +137,7 @@ final class RecordingPipeline: @unchecked Sendable {
 		for writer in writers {
 			if writer.assetWriter.status == .writing {
 				writer.videoInput.markAsFinished()
+				writer.audioInput?.markAsFinished()
 				await writer.assetWriter.finishWriting()
 			}
 			if writer.assetWriter.status == .completed {
@@ -144,13 +159,15 @@ final class RecordingPipeline: @unchecked Sendable {
 		let writer: AVAssetWriter
 		let videoInput: AVAssetWriterInput
 		let adaptor: AVAssetWriterInputPixelBufferAdaptor
+		let audioInput: AVAssetWriterInput?
 	}
 
 	private func createVideoWriter(
 		url: URL,
 		size: CGSize,
 		codec: MultiCamClient.VideoCodec,
-		bitRate: Int
+		bitRate: Int,
+		includeAudio: Bool = true
 	) throws -> WriterBundle {
 		try? FileManager.default.removeItem(at: url)
 
@@ -180,7 +197,22 @@ final class RecordingPipeline: @unchecked Sendable {
 		)
 
 		writer.add(videoInput)
-		return WriterBundle(writer: writer, videoInput: videoInput, adaptor: adaptor)
+
+		var audioInput: AVAssetWriterInput?
+		if includeAudio {
+			let audioSettings: [String: Any] = [
+				AVFormatIDKey: kAudioFormatMPEG4AAC,
+				AVSampleRateKey: 44100,
+				AVNumberOfChannelsKey: 2,
+				AVEncoderBitRateKey: 128_000,
+			]
+			let aInput = AVAssetWriterInput(mediaType: .audio, outputSettings: audioSettings)
+			aInput.expectsMediaDataInRealTime = true
+			writer.add(aInput)
+			audioInput = aInput
+		}
+
+		return WriterBundle(writer: writer, videoInput: videoInput, adaptor: adaptor, audioInput: audioInput)
 	}
 }
 #endif

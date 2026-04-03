@@ -36,15 +36,14 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 	private let textureCache: CVMetalTextureCache
 	private let mtkView: MTKView
 	private let cameraPipeline: MTLRenderPipelineState
-	private let fillPipeline: MTLRenderPipelineState
 
-	// MARK: - Frame State
+	// MARK: - Frame State (combined under single lock to prevent torn renders)
 
-	/// Per-camera latest frames.
-	private let _cameraFrames = OSAllocatedUnfairLock<[MultiCamClient.CameraID: CameraFrame]>(initialState: [:])
-
-	/// Current layout viewports — recomputed when layout changes.
-	private let _viewports = OSAllocatedUnfairLock<[LayoutEngine.CameraViewport]>(initialState: [])
+	private struct RenderState: @unchecked Sendable {
+		var cameraFrames: [MultiCamClient.CameraID: CameraFrame] = [:]
+		var viewports: [LayoutEngine.CameraViewport] = []
+	}
+	private let _renderState = OSAllocatedUnfairLock(initialState: RenderState())
 
 	/// Dirty flag.
 	private let _needsDraw = OSAllocatedUnfairLock<Bool>(initialState: false)
@@ -95,21 +94,11 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 			return nil
 		}
 
-		// Fill pipeline (background)
-		let fillDescriptor = MTLRenderPipelineDescriptor()
-		fillDescriptor.vertexFunction = library.makeFunction(name: "fillVertex")
-		fillDescriptor.fragmentFunction = library.makeFunction(name: "fillFragment")
-		fillDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-		guard let fillPipeline = try? device.makeRenderPipelineState(descriptor: fillDescriptor) else {
-			return nil
-		}
-
 		return MultiCamCompositor(
 			device: device,
 			commandQueue: commandQueue,
 			textureCache: textureCache,
-			cameraPipeline: cameraPipeline,
-			fillPipeline: fillPipeline
+			cameraPipeline: cameraPipeline
 		)
 	}
 
@@ -117,14 +106,12 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		device: MTLDevice,
 		commandQueue: MTLCommandQueue,
 		textureCache: CVMetalTextureCache,
-		cameraPipeline: MTLRenderPipelineState,
-		fillPipeline: MTLRenderPipelineState
+		cameraPipeline: MTLRenderPipelineState
 	) {
 		self.device = device
 		self.commandQueue = commandQueue
 		self.textureCache = textureCache
 		self.cameraPipeline = cameraPipeline
-		self.fillPipeline = fillPipeline
 
 		let mtkView = MTKView()
 		mtkView.device = device
@@ -183,7 +170,7 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 			  let texture = CVMetalTextureGetTexture(cvTex) else { return }
 
 		let frame = CameraFrame(cvTexture: cvTex, mtlTexture: texture, width: width, height: height)
-		_cameraFrames.withLock { $0[camera] = frame }
+		_renderState.withLock { $0.cameraFrames[camera] = frame }
 		_needsDraw.withLock { $0 = true }
 
 		DispatchQueue.main.async { [weak self] in
@@ -202,7 +189,7 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 
 		let cameras = _cameras.withLock { $0 }
 		let viewports = layoutEngine.computeViewports(layout: layout, cameras: cameras)
-		_viewports.withLock { $0 = viewports }
+		_renderState.withLock { $0.viewports = viewports }
 		_needsDraw.withLock { $0 = true }
 		DispatchQueue.main.async { [weak self] in
 			self?.mtkView.setNeedsDisplay()
@@ -213,7 +200,7 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		_cameras.withLock { $0 = cameras }
 		let layout = _layout.withLock { $0 }
 		let viewports = layoutEngine.computeViewports(layout: layout, cameras: cameras)
-		_viewports.withLock { $0 = viewports }
+		_renderState.withLock { $0.viewports = viewports }
 	}
 
 	func configureRecordingOutput(size: CGSize) {
@@ -279,8 +266,7 @@ extension MultiCamCompositor: MTKViewDelegate {
 		guard let drawable = view.currentDrawable,
 			  let passDescriptor = view.currentRenderPassDescriptor else { return }
 
-		let frames = _cameraFrames.withLock { $0 }
-		let viewports = _viewports.withLock { $0 }
+		let (frames, viewports) = _renderState.withLock { ($0.cameraFrames, $0.viewports) }
 
 		passDescriptor.colorAttachments[0].loadAction = .clear
 		passDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)

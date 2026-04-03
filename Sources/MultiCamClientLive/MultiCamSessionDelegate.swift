@@ -243,6 +243,10 @@ final class MultiCamSessionDelegate: NSObject, @unchecked Sendable {
 		               name: .AVCaptureSessionDidStopRunning, object: multiCamSession)
 		nc.addObserver(self, selector: #selector(sessionRuntimeError),
 		               name: .AVCaptureSessionRuntimeError, object: multiCamSession)
+		nc.addObserver(self, selector: #selector(sessionWasInterrupted),
+		               name: .AVCaptureSessionWasInterrupted, object: multiCamSession)
+		nc.addObserver(self, selector: #selector(sessionInterruptionEnded),
+		               name: .AVCaptureSessionInterruptionEnded, object: multiCamSession)
 
 		// Observe system pressure on each active camera device
 		for (cameraID, input) in cameraInputs {
@@ -314,6 +318,28 @@ final class MultiCamSessionDelegate: NSObject, @unchecked Sendable {
 			message = "Unknown runtime error"
 		}
 		onEvent?(.sessionError(message))
+	}
+
+	@objc private func sessionWasInterrupted(_ notification: Notification) {
+		let reason: String
+		if let userInfo = notification.userInfo,
+		   let rawReason = userInfo[AVCaptureSessionInterruptionReasonKey] as? Int {
+			switch AVCaptureSession.InterruptionReason(rawValue: rawReason) {
+			case .videoDeviceNotAvailableInBackground: reason = "App moved to background"
+			case .audioDeviceInUseByAnotherClient: reason = "Audio device in use by another app"
+			case .videoDeviceInUseByAnotherClient: reason = "Camera in use by another app"
+			case .videoDeviceNotAvailableWithMultipleForegroundApps: reason = "Camera not available in split view"
+			case .videoDeviceNotAvailableDueToSystemPressure: reason = "Camera unavailable due to system pressure"
+			default: reason = "Unknown interruption"
+			}
+		} else {
+			reason = "Session interrupted"
+		}
+		onEvent?(.sessionInterrupted(reason))
+	}
+
+	@objc private func sessionInterruptionEnded(_ notification: Notification) {
+		onEvent?(.sessionInterruptionEnded)
 	}
 }
 
