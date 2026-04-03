@@ -132,6 +132,7 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		mtkView.colorPixelFormat = .bgra8Unorm
 		mtkView.isPaused = true
 		mtkView.enableSetNeedsDisplay = true
+		mtkView.isUserInteractionEnabled = false  // Let touches pass through to parent
 		self.mtkView = mtkView
 
 		super.init(frame: .zero)
