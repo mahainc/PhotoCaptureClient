@@ -198,6 +198,19 @@ extension MultiCamClient {
 
 		// Layout
 		case layoutChanged(Layout)
+
+		// System pressure
+		case systemPressureChanged(SystemPressureLevel)
+		case hardwareCostUpdated(Float)
+	}
+
+	/// Maps to AVCaptureDevice.SystemPressureState.Level
+	public enum SystemPressureLevel: String, Sendable, Equatable {
+		case nominal
+		case fair
+		case serious
+		case critical
+		case shutdown
 	}
 }
 
