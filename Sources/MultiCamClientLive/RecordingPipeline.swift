@@ -24,8 +24,17 @@ final class RecordingPipeline: @unchecked Sendable {
 
 	// MARK: - Thread-safe state
 
+	private struct CombinedWriter {
+		let assetWriter: AVAssetWriter
+		let videoInput: AVAssetWriterInput
+		let pixelBufferAdaptor: AVAssetWriterInputPixelBufferAdaptor
+		let audioInput: AVAssetWriterInput?
+		var started: Bool = false
+	}
+
 	private struct State: @unchecked Sendable {
 		var cameraWriters: [MultiCamClient.CameraID: CameraWriter] = [:]
+		var combinedWriter: CombinedWriter?
 		var isRecording: Bool = false
 		var recordingStartDate: Date?
 	}
@@ -69,8 +78,45 @@ final class RecordingPipeline: @unchecked Sendable {
 				)
 			}
 
+			// Create combined writer for composited output
+			let combinedURL = tempDir.appendingPathComponent("multicam-combined-\(timestamp).mp4")
+			let combinedBundle = try createVideoWriter(
+				url: combinedURL, size: outputSize,
+				codec: config.videoCodec, bitRate: config.videoBitRate,
+				includeAudio: config.includeAudio
+			)
+			state.combinedWriter = CombinedWriter(
+				assetWriter: combinedBundle.writer,
+				videoInput: combinedBundle.videoInput,
+				pixelBufferAdaptor: combinedBundle.adaptor,
+				audioInput: combinedBundle.audioInput
+			)
+
 			state.isRecording = true
 			state.recordingStartDate = Date()
+		}
+	}
+
+	// MARK: - Append Composed Frame (from Metal compositor)
+
+	func appendComposedFrame(_ pixelBuffer: CVPixelBuffer, at time: CMTime) {
+		state.withLockUnchecked { state in
+			guard state.isRecording, var writer = state.combinedWriter else { return }
+
+			if !writer.started {
+				guard writer.assetWriter.startWriting() else {
+					print("📹 [RECORDING]: Combined writer startWriting failed: \(writer.assetWriter.error?.localizedDescription ?? "unknown")")
+					return
+				}
+				writer.assetWriter.startSession(atSourceTime: time)
+				writer.started = true
+				state.combinedWriter = writer
+			}
+
+			guard writer.assetWriter.status == .writing,
+				  writer.videoInput.isReadyForMoreMediaData else { return }
+
+			writer.pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: time)
 		}
 	}
 
@@ -103,11 +149,20 @@ final class RecordingPipeline: @unchecked Sendable {
 	func appendAudioSample(_ sampleBuffer: CMSampleBuffer) {
 		state.withLockUnchecked { state in
 			guard state.isRecording else { return }
+			// Feed per-camera writers
 			for (_, writer) in state.cameraWriters {
 				guard writer.started,
 					  writer.assetWriter.status == .writing,
 					  let audioInput = writer.audioInput,
 					  audioInput.isReadyForMoreMediaData else { continue }
+				audioInput.append(sampleBuffer)
+			}
+			// Feed combined writer
+			if let writer = state.combinedWriter,
+			   writer.started,
+			   writer.assetWriter.status == .writing,
+			   let audioInput = writer.audioInput,
+			   audioInput.isReadyForMoreMediaData {
 				audioInput.append(sampleBuffer)
 			}
 		}
@@ -117,21 +172,23 @@ final class RecordingPipeline: @unchecked Sendable {
 
 	func stopRecording() async throws -> MultiCamClient.RecordingResult {
 		// Snapshot and clear state synchronously
-		let (writers, duration) = state.withLock { state -> ([CameraWriter], TimeInterval) in
-			guard state.isRecording else { return ([], 0) }
+		let (writers, combined, duration) = state.withLock { state -> ([CameraWriter], CombinedWriter?, TimeInterval) in
+			guard state.isRecording else { return ([], nil, 0) }
 			state.isRecording = false
 			let d = -(state.recordingStartDate?.timeIntervalSinceNow ?? 0)
 			let w = Array(state.cameraWriters.values)
+			let c = state.combinedWriter
 			state.cameraWriters.removeAll()
+			state.combinedWriter = nil
 			state.recordingStartDate = nil
-			return (w, d)
+			return (w, c, d)
 		}
 
 		guard !writers.isEmpty else {
 			throw MultiCamClient.Error.recordingNotInProgress
 		}
 
-		// Finish writers asynchronously (no lock held)
+		// Finish all writers asynchronously (no lock held)
 		var individualURLs: [MultiCamClient.CameraID: URL] = [:]
 
 		for writer in writers {
@@ -145,8 +202,19 @@ final class RecordingPipeline: @unchecked Sendable {
 			}
 		}
 
+		// Finish combined writer
+		var combinedURL: URL?
+		if let cw = combined, cw.assetWriter.status == .writing {
+			cw.videoInput.markAsFinished()
+			cw.audioInput?.markAsFinished()
+			await cw.assetWriter.finishWriting()
+			if cw.assetWriter.status == .completed {
+				combinedURL = cw.assetWriter.outputURL
+			}
+		}
+
 		return MultiCamClient.RecordingResult(
-			combinedURL: nil,
+			combinedURL: combinedURL,
 			individualURLs: individualURLs,
 			duration: duration,
 			timestamp: .now

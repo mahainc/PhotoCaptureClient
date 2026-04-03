@@ -269,9 +269,21 @@ actor MultiCamClientActor {
 			cameras: activeCameras,
 			outputSize: outputSize
 		)
+
+		// Enable compositor offscreen recording
+		let pipeline = recordingPipeline
+		let comp = compositor
+		await MainActor.run {
+			comp?.configureRecordingOutput(size: outputSize)
+			comp?.onRecordingFrame = { pixelBuffer, time in
+				pipeline.appendComposedFrame(pixelBuffer, at: time)
+			}
+			comp?.isRecording = true
+		}
+
 		isRecording = true
 		yieldEvent(.recordingStarted)
-		logger("Recording started")
+		logger("Recording started (with real-time compositing)")
 	}
 
 	func stopRecording() async throws -> MultiCamClient.RecordingResult {
@@ -279,10 +291,17 @@ actor MultiCamClientActor {
 			throw MultiCamClient.Error.recordingNotInProgress
 		}
 
+		// Stop compositor recording first
+		let comp = compositor
+		await MainActor.run {
+			comp?.isRecording = false
+			comp?.onRecordingFrame = nil
+		}
+
 		let result = try await recordingPipeline.stopRecording()
 		isRecording = false
 		yieldEvent(.recordingStopped(result))
-		logger("Recording stopped: duration=\(result.duration)s")
+		logger("Recording stopped: duration=\(result.duration)s, combined=\(result.combinedURL != nil)")
 		return result
 	}
 

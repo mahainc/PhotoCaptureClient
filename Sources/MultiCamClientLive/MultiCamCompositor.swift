@@ -62,10 +62,17 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 
 	// MARK: - Recording Offscreen
 
-	/// Callback for recording pipeline — receives composited frame.
+	/// Callback for recording pipeline — receives composited frame synchronously.
 	var onRecordingFrame: ((_ pixelBuffer: CVPixelBuffer, _ time: CMTime) -> Void)?
 	private var recordingPixelBufferPool: CVPixelBufferPool?
 	private var recordingOutputSize: CGSize = .zero
+	private var recordingTextureCache: CVMetalTextureCache?
+	private var _isRecording = OSAllocatedUnfairLock(initialState: false)
+
+	var isRecording: Bool {
+		get { _isRecording.withLock { $0 } }
+		set { _isRecording.withLock { $0 = newValue } }
+	}
 
 	// MARK: - Init
 
@@ -205,16 +212,21 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 
 	func configureRecordingOutput(size: CGSize) {
 		recordingOutputSize = size
-		// Create pixel buffer pool for recording
 		let attrs: [String: Any] = [
 			kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
 			kCVPixelBufferWidthKey as String: Int(size.width),
 			kCVPixelBufferHeightKey as String: Int(size.height),
 			kCVPixelBufferIOSurfacePropertiesKey as String: [:],
+			kCVPixelBufferMetalCompatibilityKey as String: true,
 		]
 		var pool: CVPixelBufferPool?
 		CVPixelBufferPoolCreate(kCFAllocatorDefault, nil, attrs as CFDictionary, &pool)
 		recordingPixelBufferPool = pool
+
+		// Create a separate texture cache for recording pixel buffers
+		var cache: CVMetalTextureCache?
+		CVMetalTextureCacheCreate(kCFAllocatorDefault, nil, device, nil, &cache)
+		recordingTextureCache = cache
 	}
 
 	// MARK: - Aspect-Fill for a Viewport
@@ -312,6 +324,64 @@ extension MultiCamCompositor: MTKViewDelegate {
 		encoder.endEncoding()
 		commandBuffer.present(drawable)
 		commandBuffer.commit()
+
+		// Offscreen render for recording (same scene → pixel buffer)
+		if _isRecording.withLock({ $0 }),
+		   let pool = recordingPixelBufferPool,
+		   let recCache = recordingTextureCache,
+		   let callback = onRecordingFrame {
+			var pixelBuffer: CVPixelBuffer?
+			let status = CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &pixelBuffer)
+			if status == kCVReturnSuccess, let pb = pixelBuffer {
+				let width = CVPixelBufferGetWidth(pb)
+				let height = CVPixelBufferGetHeight(pb)
+
+				var cvTexture: CVMetalTexture?
+				let texStatus = CVMetalTextureCacheCreateTextureFromImage(
+					kCFAllocatorDefault, recCache, pb, nil, .bgra8Unorm, width, height, 0, &cvTexture
+				)
+				if texStatus == kCVReturnSuccess, let cvTex = cvTexture, let offscreenTexture = CVMetalTextureGetTexture(cvTex) {
+					let offscreenDescriptor = MTLRenderPassDescriptor()
+					offscreenDescriptor.colorAttachments[0].texture = offscreenTexture
+					offscreenDescriptor.colorAttachments[0].loadAction = .clear
+					offscreenDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+					offscreenDescriptor.colorAttachments[0].storeAction = .store
+
+					if let offscreenCB = commandQueue.makeCommandBuffer(),
+					   let offscreenEncoder = offscreenCB.makeRenderCommandEncoder(descriptor: offscreenDescriptor) {
+
+						let offscreenSize = CGSize(width: width, height: height)
+						for viewport in sortedViewports {
+							guard let frame = frames[viewport.cameraID] else { continue }
+							let (uvS, uvO) = computeAspectFill(
+								viewportRect: viewport.rect, drawableSize: offscreenSize,
+								textureWidth: frame.width, textureHeight: frame.height
+							)
+							var u = MultiCamUniforms(
+								viewportRect: SIMD4<Float>(
+									Float(viewport.rect.origin.x), Float(viewport.rect.origin.y),
+									Float(viewport.rect.size.width), Float(viewport.rect.size.height)
+								),
+								uvScale: uvS, uvOffset: uvO,
+								cornerRadius: Float(viewport.cornerRadius),
+								_pad1: 0, _pad2: .zero
+							)
+							offscreenEncoder.setRenderPipelineState(cameraPipeline)
+							offscreenEncoder.setVertexBytes(&u, length: MemoryLayout<MultiCamUniforms>.stride, index: 0)
+							offscreenEncoder.setFragmentTexture(frame.mtlTexture, index: 0)
+							offscreenEncoder.setFragmentBytes(&u, length: MemoryLayout<MultiCamUniforms>.stride, index: 0)
+							offscreenEncoder.drawPrimitives(type: .triangleStrip, vertexStart: 0, vertexCount: 4)
+						}
+						offscreenEncoder.endEncoding()
+						offscreenCB.addCompletedHandler { _ in
+							let time = CMTime(value: CMTimeValue(CACurrentMediaTime() * 1000), timescale: 1000)
+							callback(pb, time)
+						}
+						offscreenCB.commit()
+					}
+				}
+			}
+		}
 	}
 }
 #endif

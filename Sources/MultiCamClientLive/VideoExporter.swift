@@ -13,16 +13,144 @@ public enum VideoExporter {
 		case horizontal
 	}
 
-	/// Composite multiple video files into a single video.
-	public static func compositeVideos(
+	// MARK: - Composite with Custom Layout (matches preview)
+
+	/// Composite multiple videos using per-camera viewport rects that match the live preview layout.
+	///
+	/// - Parameters:
+	///   - urls: Video file URLs in camera order.
+	///   - cameraOrder: Camera IDs in the same order as urls.
+	///   - frames: Per-camera viewport rects in normalized 0-1 space (from CustomLayout).
+	///   - outputSize: Target output resolution.
+	///   - fileType: Output file type (.mp4 or .mov).
+	/// - Returns: URL of the composited video file.
+	public static func compositeWithLayout(
 		_ urls: [URL],
-		layout: CompositeLayout,
-		outputSize: CGSize
+		cameraOrder: [MultiCamClient.CameraID],
+		frames: [MultiCamClient.CameraID: CGRect],
+		outputSize: CGSize,
+		fileType: AVFileType = .mp4
 	) async throws -> URL {
 		let assets = urls.map { AVURLAsset(url: $0) }
 		guard assets.count >= 2 else { return urls[0] }
 
-		// Batch-load all properties in parallel
+		// Batch-load properties
+		var durations: [CMTime] = []
+		var videoTracks: [AVAssetTrack] = []
+		var sizes: [CGSize] = []
+		var trackTransforms: [CGAffineTransform] = []
+
+		for asset in assets {
+			async let d = asset.load(.duration)
+			async let tracks = asset.loadTracks(withMediaType: .video)
+			let duration = try await d
+			guard let track = try await tracks.first else { continue }
+			let naturalSize = try await track.load(.naturalSize)
+			let transform = try await track.load(.preferredTransform)
+			let t = naturalSize.applying(transform)
+
+			durations.append(duration)
+			videoTracks.append(track)
+			sizes.append(CGSize(width: abs(t.width), height: abs(t.height)))
+			trackTransforms.append(transform)
+		}
+
+		guard videoTracks.count >= 2 else { return urls[0] }
+		let minDuration = durations.min() ?? .zero
+
+		let composition = AVMutableComposition()
+		let timeRange = CMTimeRange(start: .zero, duration: minDuration)
+		var compositionTracks: [AVMutableCompositionTrack] = []
+
+		for (i, track) in videoTracks.enumerated() {
+			guard let ct = composition.addMutableTrack(withMediaType: .video, preferredTrackID: CMPersistentTrackID(i + 1)) else { continue }
+			try ct.insertTimeRange(timeRange, of: track, at: .zero)
+			compositionTracks.append(ct)
+		}
+
+		// Add audio from first source
+		for asset in assets {
+			if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
+			   let audioCompTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+				try? audioCompTrack.insertTimeRange(timeRange, of: audioTrack, at: .zero)
+				break
+			}
+		}
+
+		let videoComposition = AVMutableVideoComposition()
+		videoComposition.renderSize = outputSize
+		videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+
+		let instruction = AVMutableVideoCompositionInstruction()
+		instruction.timeRange = timeRange
+		var layerInstructions: [AVMutableVideoCompositionLayerInstruction] = []
+
+		for (i, ct) in compositionTracks.enumerated() {
+			guard i < cameraOrder.count else { continue }
+			let cameraID = cameraOrder[i]
+			guard let vpRect = frames[cameraID] else { continue }
+
+			let li = AVMutableVideoCompositionLayerInstruction(assetTrack: ct)
+			let srcSize = sizes[i]
+			let trackTransform = trackTransforms[i]
+
+			// Convert viewport rect (0-1 normalized) to pixel coordinates
+			let vpX = vpRect.origin.x * outputSize.width
+			let vpY = vpRect.origin.y * outputSize.height
+			let vpW = vpRect.width * outputSize.width
+			let vpH = vpRect.height * outputSize.height
+
+			// Aspect-fill: scale to fill the viewport while preserving aspect ratio
+			let scaleX = vpW / srcSize.width
+			let scaleY = vpH / srcSize.height
+			let scale = max(scaleX, scaleY) // fill (not fit)
+			let scaledW = srcSize.width * scale
+			let scaledH = srcSize.height * scale
+			let xOff = vpX + (vpW - scaledW) / 2
+			let yOff = vpY + (vpH - scaledH) / 2
+
+			let transform = trackTransform
+				.concatenating(CGAffineTransform(scaleX: scale, y: scale))
+				.concatenating(CGAffineTransform(translationX: xOff, y: yOff))
+
+			li.setTransform(transform, at: .zero)
+			layerInstructions.append(li)
+		}
+
+		instruction.layerInstructions = layerInstructions
+		videoComposition.instructions = [instruction]
+
+		let ext = fileType == .mov ? "mov" : "mp4"
+		let outputURL = FileManager.default.temporaryDirectory
+			.appendingPathComponent("multicam-composite-\(UUID().uuidString.prefix(8)).\(ext)")
+		try? FileManager.default.removeItem(at: outputURL)
+
+		guard let session = AVAssetExportSession(asset: composition, presetName: exportPreset(for: outputSize)) else {
+			throw MultiCamClient.Error.exportFailed("Failed to create export session")
+		}
+		session.outputURL = outputURL
+		session.outputFileType = fileType
+		session.videoComposition = videoComposition
+		session.shouldOptimizeForNetworkUse = true
+		await session.export()
+		guard session.status == .completed else {
+			throw session.error ?? MultiCamClient.Error.exportFailed("Export failed")
+		}
+		return outputURL
+	}
+
+	// MARK: - Simple Composite (vertical/horizontal stack)
+
+	/// Composite multiple videos in a simple stack layout.
+	public static func compositeVideos(
+		_ urls: [URL],
+		layout: CompositeLayout,
+		outputSize: CGSize,
+		fileType: AVFileType = .mp4
+	) async throws -> URL {
+		let assets = urls.map { AVURLAsset(url: $0) }
+		guard assets.count >= 2 else { return urls[0] }
+
 		var durations: [CMTime] = []
 		var videoTracks: [AVAssetTrack] = []
 		var sizes: [CGSize] = []
@@ -49,14 +177,12 @@ public enum VideoExporter {
 		let composition = AVMutableComposition()
 		let timeRange = CMTimeRange(start: .zero, duration: minDuration)
 		var compositionTracks: [AVMutableCompositionTrack] = []
-
 		for (i, track) in videoTracks.enumerated() {
 			guard let ct = composition.addMutableTrack(withMediaType: .video, preferredTrackID: CMPersistentTrackID(i + 1)) else { continue }
 			try ct.insertTimeRange(timeRange, of: track, at: .zero)
 			compositionTracks.append(ct)
 		}
 
-		// Add audio from first source that has it
 		for asset in assets {
 			if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
 			   let audioCompTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
@@ -104,37 +230,37 @@ public enum VideoExporter {
 		instruction.layerInstructions = layerInstructions
 		videoComposition.instructions = [instruction]
 
-		let suffix = layout == .vertical ? "9x16" : "16x9"
+		let ext = fileType == .mov ? "mov" : "mp4"
 		let outputURL = FileManager.default.temporaryDirectory
-			.appendingPathComponent("multicam-\(suffix)-\(UUID().uuidString.prefix(8)).mp4")
+			.appendingPathComponent("multicam-\(layout == .vertical ? "9x16" : "16x9")-\(UUID().uuidString.prefix(8)).\(ext)")
 		try? FileManager.default.removeItem(at: outputURL)
 
 		guard let session = AVAssetExportSession(asset: composition, presetName: exportPreset(for: outputSize)) else {
 			throw MultiCamClient.Error.exportFailed("Failed to create export session")
 		}
 		session.outputURL = outputURL
-		session.outputFileType = .mp4
+		session.outputFileType = fileType
 		session.videoComposition = videoComposition
 		session.shouldOptimizeForNetworkUse = true
 		await session.export()
-
 		guard session.status == .completed else {
 			throw session.error ?? MultiCamClient.Error.exportFailed("Export failed")
 		}
 		return outputURL
 	}
 
-	/// Crop/resize a single video to the target aspect ratio using center-crop.
-	/// If the source already matches the target ratio, returns the original URL (no re-encoding).
+	// MARK: - Crop Single Video
+
+	/// Crop/resize a single video to the target aspect ratio.
 	public static func cropVideo(
 		_ url: URL,
 		toRatio ratio: MultiCamClient.AspectRatio,
 		outputSize: CGSize,
-		label: String = "cropped"
+		label: String = "cropped",
+		cornerRadius: CGFloat = 0,
+		fileType: AVFileType = .mp4
 	) async throws -> URL {
 		let asset = AVURLAsset(url: url)
-
-		// Batch-load properties
 		async let durationTask = asset.load(.duration)
 		async let tracksTask = asset.loadTracks(withMediaType: .video)
 
@@ -150,10 +276,10 @@ public enum VideoExporter {
 		// Skip re-encoding if source ratio approximately matches target
 		let srcRatio = srcW / srcH
 		let targetRatio = outputSize.width / outputSize.height
-		if abs(srcRatio - targetRatio) < 0.05 {
-			// Ratio matches — just copy the file (no re-encoding needed)
+		if abs(srcRatio - targetRatio) < 0.05 && cornerRadius == 0 {
+			let ext = fileType == .mov ? "mov" : "mp4"
 			let copyURL = FileManager.default.temporaryDirectory
-				.appendingPathComponent("multicam-\(label)-copy-\(UUID().uuidString.prefix(8)).mp4")
+				.appendingPathComponent("multicam-\(label)-copy-\(UUID().uuidString.prefix(8)).\(ext)")
 			try? FileManager.default.removeItem(at: copyURL)
 			try FileManager.default.copyItem(at: url, to: copyURL)
 			return copyURL
@@ -164,7 +290,6 @@ public enum VideoExporter {
 		guard let compTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: 1) else { return url }
 		try compTrack.insertTimeRange(timeRange, of: track, at: .zero)
 
-		// Add audio if present
 		if let audioTrack = try? await asset.loadTracks(withMediaType: .audio).first,
 		   let audioCompTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
 			try? audioCompTrack.insertTimeRange(timeRange, of: audioTrack, at: .zero)
@@ -186,23 +311,35 @@ public enum VideoExporter {
 		videoComposition.renderSize = outputSize
 		videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
 
-		let instruction = AVMutableVideoCompositionInstruction()
-		instruction.timeRange = timeRange
-		let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
-		layerInstruction.setTransform(transform, at: .zero)
-		instruction.layerInstructions = [layerInstruction]
-		videoComposition.instructions = [instruction]
+		if cornerRadius > 0 {
+			videoComposition.customVideoCompositorClass = RoundedRectCompositor.self
+			let roundedInstruction = RoundedRectInstruction(
+				timeRange: timeRange,
+				sourceTrackID: compTrack.trackID,
+				cornerRadius: cornerRadius
+			)
+			videoComposition.instructions = [roundedInstruction]
+			compTrack.preferredTransform = transform
+		} else {
+			let instruction = AVMutableVideoCompositionInstruction()
+			instruction.timeRange = timeRange
+			let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
+			layerInstruction.setTransform(transform, at: .zero)
+			instruction.layerInstructions = [layerInstruction]
+			videoComposition.instructions = [instruction]
+		}
 
+		let ext = fileType == .mov ? "mov" : "mp4"
 		let ratioStr = ratio.rawValue.replacingOccurrences(of: ":", with: "x")
 		let outputURL = FileManager.default.temporaryDirectory
-			.appendingPathComponent("multicam-\(label)-\(ratioStr)-\(UUID().uuidString.prefix(8)).mp4")
+			.appendingPathComponent("multicam-\(label)-\(ratioStr)-\(UUID().uuidString.prefix(8)).\(ext)")
 		try? FileManager.default.removeItem(at: outputURL)
 
 		guard let session = AVAssetExportSession(asset: composition, presetName: exportPreset(for: outputSize)) else {
 			throw MultiCamClient.Error.exportFailed("Failed to create export session for crop")
 		}
 		session.outputURL = outputURL
-		session.outputFileType = .mp4
+		session.outputFileType = fileType
 		session.videoComposition = videoComposition
 		session.shouldOptimizeForNetworkUse = true
 		await session.export()
