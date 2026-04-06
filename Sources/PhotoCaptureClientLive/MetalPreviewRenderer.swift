@@ -248,7 +248,8 @@ final class MetalPreviewRenderer: UIView, @unchecked Sendable {
 		}
 
 		// Retain CVMetalTexture alongside MTLTexture to keep backing IOSurface alive until next frame
-		_currentFrame.withLock { $0 = CameraFrame(cvTexture: cvTex, mtlTexture: texture) }
+		let frame = CameraFrame(cvTexture: cvTex, mtlTexture: texture)
+		_currentFrame.withLock { $0 = frame }
 		_textureSize.withLock { $0 = SIMD2<Float>(Float(width), Float(height)) }
 		_needsDraw.withLock { $0 = true }
 
