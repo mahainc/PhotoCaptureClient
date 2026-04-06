@@ -49,6 +49,17 @@ final class MultiCamSessionDelegate: NSObject, @unchecked Sendable {
 		}
 
 		let session = AVCaptureMultiCamSession()
+		session.automaticallyConfiguresApplicationAudioSession = false
+		do {
+			try AVAudioSession.sharedInstance().setCategory(
+				.playAndRecord,
+				options: [.defaultToSpeaker, .allowBluetooth, .mixWithOthers]
+			)
+			try AVAudioSession.sharedInstance().setAllowHapticsAndSystemSoundsDuringRecording(true)
+			try AVAudioSession.sharedInstance().setActive(true)
+		} catch {
+			onEvent?(.sessionError("Audio session setup failed: \(error.localizedDescription)"))
+		}
 		session.beginConfiguration()
 
 		var addedCameras: [MultiCamClient.CameraID] = []
@@ -219,6 +230,25 @@ final class MultiCamSessionDelegate: NSObject, @unchecked Sendable {
 		let clamped = min(max(factor, minZoom), maxZoom)
 		try device.lockForConfiguration()
 		device.videoZoomFactor = clamped
+		device.unlockForConfiguration()
+	}
+
+	// MARK: - Torch
+
+	func setTorch(mode: MultiCamClient.TorchMode) {
+		// Find any back camera with torch capability
+		let backCamera = cameraInputs.first { key, input in
+			key.rawValue.hasPrefix("back") && input.device.hasTorch
+		}?.value.device
+		guard let device = backCamera else { return }
+		let avMode: AVCaptureDevice.TorchMode
+		switch mode {
+		case .off: avMode = .off
+		case .on: avMode = .on
+		case .auto: avMode = .auto
+		}
+		try? device.lockForConfiguration()
+		device.torchMode = avMode
 		device.unlockForConfiguration()
 	}
 

@@ -201,12 +201,6 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 	func setLayout(_ layout: MultiCamClient.Layout) {
 		_layout.withLock { $0 = layout }
 
-		// For custom layouts, update camera list from the layout's frame keys
-		if case .custom(let custom) = layout {
-			let layoutCameras = Array(custom.frames.keys).sorted { $0.rawValue < $1.rawValue }
-			_cameras.withLock { $0 = layoutCameras }
-		}
-
 		let cameras = _cameras.withLock { $0 }
 		let viewports = layoutEngine.computeViewports(layout: layout, cameras: cameras)
 		_renderState.withLock { $0.viewports = viewports }

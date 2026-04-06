@@ -66,6 +66,12 @@ public struct MultiCamClient: Sendable {
 	/// Set stabilization mode for a specific camera.
 	public var setStabilization: @Sendable (_ camera: CameraID, _ mode: StabilizationMode) async -> Void = { _, _ in }
 
+	/// Set the camera draw order (first = background, rest = overlays).
+	public var setCameraOrder: @Sendable (_ cameras: [CameraID]) async -> Void = { _ in }
+
+	/// Set the torch (flashlight) mode for the back camera.
+	public var setTorch: @Sendable (_ mode: TorchMode) async -> Void = { _ in }
+
 	/// Set border style for PiP overlay cameras.
 	/// - Parameters:
 	///   - width: Border width in normalized viewport space (0 = no border, 0.02 = thin, 0.05 = thick)

@@ -84,7 +84,8 @@ final class RecordingPipeline: @unchecked Sendable {
 	func startRecording(
 		config: MultiCamClient.RecordingConfiguration,
 		cameras: [MultiCamClient.CameraID],
-		outputSize: CGSize
+		cameraSize: CGSize,
+		compositeSize: CGSize
 	) throws {
 		try state.withLock { state in
 			guard !state.isRecording else {
@@ -94,11 +95,12 @@ final class RecordingPipeline: @unchecked Sendable {
 			let tempDir = FileManager.default.temporaryDirectory
 			let timestamp = Int(Date().timeIntervalSince1970)
 
+			// Per-camera writers use standard camera resolution (matches pixel buffer dimensions)
 			for camera in cameras {
 				let url = tempDir.appendingPathComponent("multicam-\(camera.rawValue)-\(timestamp).mp4")
 				let writer = try createVideoWriter(
 					url: url,
-					size: outputSize,
+					size: cameraSize,
 					codec: config.videoCodec,
 					bitRate: config.videoBitRate,
 					includeAudio: config.includeAudio
@@ -112,10 +114,10 @@ final class RecordingPipeline: @unchecked Sendable {
 				)
 			}
 
-			// Create combined writer for composited output
+			// Combined writer uses compositor output size (matches Metal render target)
 			let combinedURL = tempDir.appendingPathComponent("multicam-combined-\(timestamp).mp4")
 			let combinedBundle = try createVideoWriter(
-				url: combinedURL, size: outputSize,
+				url: combinedURL, size: compositeSize,
 				codec: config.videoCodec, bitRate: config.videoBitRate,
 				includeAudio: config.includeAudio
 			)
@@ -141,6 +143,10 @@ final class RecordingPipeline: @unchecked Sendable {
 			let adjustedTime = CMTimeSubtract(time, state.timeOffset)
 
 			if !writer.started {
+				guard writer.assetWriter.status == .unknown else {
+					print("📹 [RECORDING]: Combined writer already in status=\(writer.assetWriter.status.rawValue), error=\(writer.assetWriter.error?.localizedDescription ?? "nil")")
+					return
+				}
 				guard writer.assetWriter.startWriting() else {
 					print("📹 [RECORDING]: Combined writer startWriting failed: \(writer.assetWriter.error?.localizedDescription ?? "unknown")")
 					return
@@ -153,7 +159,9 @@ final class RecordingPipeline: @unchecked Sendable {
 			guard writer.assetWriter.status == .writing,
 				  writer.videoInput.isReadyForMoreMediaData else { return }
 
-			writer.pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: adjustedTime)
+			if !writer.pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: adjustedTime) {
+				print("📹 [RECORDING]: combined append failed, status=\(writer.assetWriter.status.rawValue), error=\(writer.assetWriter.error?.localizedDescription ?? "nil")")
+			}
 		}
 	}
 
@@ -176,6 +184,10 @@ final class RecordingPipeline: @unchecked Sendable {
 			let time = CMTimeSubtract(rawTime, state.timeOffset)
 
 			if !writer.started {
+				guard writer.assetWriter.status == .unknown else {
+					print("📹 [RECORDING]: writer \(camera.rawValue) already in status=\(writer.assetWriter.status.rawValue), error=\(writer.assetWriter.error?.localizedDescription ?? "nil")")
+					return
+				}
 				guard writer.assetWriter.startWriting() else {
 					print("📹 [RECORDING]: startWriting failed for \(camera.rawValue): \(writer.assetWriter.error?.localizedDescription ?? "unknown")")
 					return
@@ -189,7 +201,9 @@ final class RecordingPipeline: @unchecked Sendable {
 				  writer.videoInput.isReadyForMoreMediaData,
 				  let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-			writer.pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: time)
+			if !writer.pixelBufferAdaptor.append(pixelBuffer, withPresentationTime: time) {
+				print("📹 [RECORDING]: append failed for \(camera.rawValue), status=\(writer.assetWriter.status.rawValue), error=\(writer.assetWriter.error?.localizedDescription ?? "nil")")
+			}
 			state.lastWrittenTime = rawTime
 		}
 	}
@@ -257,17 +271,23 @@ final class RecordingPipeline: @unchecked Sendable {
 			}
 			if writer.assetWriter.status == .completed {
 				individualURLs[writer.cameraID] = writer.assetWriter.outputURL
+			} else {
+				print("📹 [RECORDING]: writer \(writer.cameraID.rawValue) finished with status=\(writer.assetWriter.status.rawValue), started=\(writer.started), error=\(writer.assetWriter.error?.localizedDescription ?? "nil")")
 			}
 		}
 
 		// Finish combined writer
 		var combinedURL: URL?
-		if let cw = combined, cw.assetWriter.status == .writing {
-			cw.videoInput.markAsFinished()
-			cw.audioInput?.markAsFinished()
-			await cw.assetWriter.finishWriting()
+		if let cw = combined {
+			if cw.assetWriter.status == .writing {
+				cw.videoInput.markAsFinished()
+				cw.audioInput?.markAsFinished()
+				await cw.assetWriter.finishWriting()
+			}
 			if cw.assetWriter.status == .completed {
 				combinedURL = cw.assetWriter.outputURL
+			} else {
+				print("📹 [RECORDING]: combined writer finished with status=\(cw.assetWriter.status.rawValue), started=\(cw.started), error=\(cw.assetWriter.error?.localizedDescription ?? "nil")")
 			}
 		}
 
@@ -300,10 +320,14 @@ final class RecordingPipeline: @unchecked Sendable {
 		let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
 		let avCodec: AVVideoCodecType = codec == .hevc ? .hevc : .h264
 
+		// H.264/HEVC require even dimensions — enforce at writer level as a safety net
+		let width = Int(size.width) + (Int(size.width) % 2)
+		let height = Int(size.height) + (Int(size.height) % 2)
+
 		let videoSettings: [String: Any] = [
 			AVVideoCodecKey: avCodec,
-			AVVideoWidthKey: Int(size.width),
-			AVVideoHeightKey: Int(size.height),
+			AVVideoWidthKey: width,
+			AVVideoHeightKey: height,
 			AVVideoCompressionPropertiesKey: [
 				AVVideoAverageBitRateKey: bitRate,
 				AVVideoExpectedSourceFrameRateKey: 30,
@@ -317,8 +341,8 @@ final class RecordingPipeline: @unchecked Sendable {
 			assetWriterInput: videoInput,
 			sourcePixelBufferAttributes: [
 				kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
-				kCVPixelBufferWidthKey as String: Int(size.width),
-				kCVPixelBufferHeightKey as String: Int(size.height),
+				kCVPixelBufferWidthKey as String: width,
+				kCVPixelBufferHeightKey as String: height,
 			]
 		)
 

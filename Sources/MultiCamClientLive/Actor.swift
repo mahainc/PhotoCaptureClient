@@ -207,7 +207,9 @@ actor MultiCamClientActor {
 		logger("Stopping multi-cam session (isRunning=\(delegate.isRunning))")
 
 		if isRecording {
-			_ = try? await recordingPipeline.stopRecording()
+			if let result = try? await recordingPipeline.stopRecording() {
+				yieldEvent(.recordingStopped(result))
+			}
 			isRecording = false
 		}
 
@@ -241,6 +243,16 @@ actor MultiCamClientActor {
 		yieldEvent(.layoutChanged(layout))
 	}
 
+	func setCameraOrder(_ cameras: [MultiCamClient.CameraID]) async {
+		activeCameras = cameras
+		let comp = compositor
+		let layout = currentLayout
+		await MainActor.run {
+			comp?.setCameras(cameras)
+			comp?.setLayout(layout)
+		}
+	}
+
 	func getLayout() -> MultiCamClient.Layout {
 		currentLayout
 	}
@@ -253,6 +265,11 @@ actor MultiCamClientActor {
 			comp?.borderWidth = width
 			comp?.borderColor = SIMD4<Float>(r, g, b, 1.0)
 		}
+	}
+
+	func setTorch(mode: MultiCamClient.TorchMode) {
+		delegate.setTorch(mode: mode)
+		logger("Torch set to \(mode.rawValue)")
 	}
 
 	func setStabilization(camera: MultiCamClient.CameraID, mode: MultiCamClient.StabilizationMode) {
@@ -282,23 +299,27 @@ actor MultiCamClientActor {
 			throw MultiCamClient.Error.recordingAlreadyInProgress
 		}
 
-		// Use screen aspect ratio for offscreen buffer so viewport rects map correctly
+		// Per-camera writers use standard 9:16 portrait (matches camera pixel buffer dimensions)
+		let cameraSize = CGSize(width: 1080, height: 1920)
+
+		// Compositor uses screen aspect ratio so viewport rects map correctly
 		let screenBounds = await MainActor.run { UIScreen.main.bounds }
 		let screenAR = screenBounds.width / screenBounds.height
-		let outputWidth = CGFloat(config.outputWidth)
-		let outputHeight = (outputWidth / screenAR).rounded(.toNearestOrEven)
-		let outputSize = CGSize(width: outputWidth, height: outputHeight)
+		let compositeWidth = max(2, config.outputWidth)
+		let rawCompH = Int((CGFloat(compositeWidth) / screenAR).rounded())
+		let compositeSize = CGSize(width: compositeWidth, height: rawCompH + (rawCompH % 2))
 		try recordingPipeline.startRecording(
 			config: config,
 			cameras: activeCameras,
-			outputSize: outputSize
+			cameraSize: cameraSize,
+			compositeSize: compositeSize
 		)
 
 		// Enable compositor offscreen recording
 		let pipeline = recordingPipeline
 		let comp = compositor
 		await MainActor.run {
-			comp?.configureRecordingOutput(size: outputSize)
+			comp?.configureRecordingOutput(size: compositeSize)
 			comp?.onRecordingFrame = { pixelBuffer, time in
 				pipeline.appendComposedFrame(pixelBuffer, at: time)
 			}

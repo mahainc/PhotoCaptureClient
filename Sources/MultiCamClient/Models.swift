@@ -106,6 +106,16 @@ extension MultiCamClient {
 	}
 }
 
+// MARK: - Torch Mode
+
+extension MultiCamClient {
+	public enum TorchMode: String, Sendable, Equatable, CaseIterable {
+		case off
+		case on
+		case auto
+	}
+}
+
 // MARK: - Session Configuration
 
 extension MultiCamClient {
@@ -222,8 +232,8 @@ extension MultiCamClient {
 		public var videoCodec: VideoCodec
 		public var audioBitRate: Int
 		public var videoBitRate: Int
-		/// Output width in pixels. Height is derived from screen aspect ratio.
-		/// Default 1080 (1080p). Use 2160 for 4K.
+		/// Output width in pixels for the composited recording.
+		/// Height is derived from screen aspect ratio.
 		public var outputWidth: Int
 
 		public init(
@@ -239,7 +249,7 @@ extension MultiCamClient {
 			self.videoCodec = videoCodec
 			self.audioBitRate = audioBitRate
 			self.videoBitRate = videoBitRate
-			self.outputWidth = outputWidth
+			self.outputWidth = max(2, outputWidth)
 		}
 	}
 

@@ -24,6 +24,8 @@ public struct LayoutPresetEngine: Sendable {
 		cameras: [MultiCamClient.CameraID],
 		pipPositions: [String: CGPoint] = [:],
 		pipCornerRadius: CGFloat = 0.06,
+		pipForceSquare: Bool = false,
+		pipForceLandscape: Bool = false,
 		cameraRatios: [String: MultiCamClient.AspectRatio] = [:],
 		overlaySizes: [String: CGFloat] = [:],
 		screenAspectRatio: CGFloat = 0.46
@@ -88,33 +90,46 @@ public struct LayoutPresetEngine: Sendable {
 			frames[cameras[0]] = CGRect(x: 0, y: 0, width: 1, height: 1)
 			let others = Array(cameras.dropFirst())
 			let padding: CGFloat = 0.02
-			let defaultBaseWidth: CGFloat = 0.22
+			let defaultBaseWidth: CGFloat = 0.35
 			let sa = screenAspectRatio
 			var radii: [MultiCamClient.CameraID: CGFloat] = [:]
 			var yOffset: CGFloat = padding
 			for cam in others {
 				let bw = overlaySizes[cam.rawValue] ?? defaultBaseWidth
-				let ratio = cameraRatios[cam.rawValue] ?? .ratio9x16
 				let overlayW: CGFloat
 				let overlayH: CGFloat
-				switch ratio {
-				case .ratio9x16:
-					overlayW = bw
-					overlayH = bw * sa * (16.0 / 9.0)
-				case .ratio16x9:
-					overlayW = bw
-					overlayH = bw * sa * (9.0 / 16.0)
-				case .ratio1x1:
+				if pipForceSquare {
+					// Square / circle shapes require equal visual dimensions
 					overlayW = bw
 					overlayH = bw * sa
-				case .ratio4x3:
-					overlayW = bw
-					overlayH = bw * sa * (4.0 / 3.0)
+				} else if pipForceLandscape {
+					// Landscape rectangle: wider than tall (16:9 landscape ratio)
+					overlayW = bw * 1.5
+					overlayH = bw * sa * (9.0 / 16.0) * 1.5
+				} else {
+					let ratio = cameraRatios[cam.rawValue] ?? .ratio9x16
+					switch ratio {
+					case .ratio9x16:
+						overlayW = bw
+						overlayH = bw * sa * (16.0 / 9.0)
+					case .ratio16x9:
+						overlayW = bw
+						overlayH = bw * sa * (9.0 / 16.0)
+					case .ratio1x1:
+						overlayW = bw
+						overlayH = bw * sa
+					case .ratio4x3:
+						overlayW = bw
+						overlayH = bw * sa * (4.0 / 3.0)
+					}
 				}
 				if let dragPos = pipPositions[cam.rawValue] {
 					frames[cam] = CGRect(x: dragPos.x, y: dragPos.y, width: overlayW, height: overlayH)
 				} else {
-					frames[cam] = CGRect(x: 1.0 - overlayW - padding, y: yOffset, width: overlayW, height: overlayH)
+					// Position overlay at bottom 1/3, horizontally centered
+					let centerX = (1.0 - overlayW) / 2.0
+					let centerY = (2.0 / 3.0) - (overlayH / 2.0)
+					frames[cam] = CGRect(x: centerX, y: centerY, width: overlayW, height: overlayH)
 				}
 				radii[cam] = pipCornerRadius
 				yOffset += overlayH + padding
@@ -131,11 +146,13 @@ public struct LayoutPresetEngine: Sendable {
 		cameras: [MultiCamClient.CameraID],
 		pipPositions: [String: CGPoint] = [:],
 		pipCornerRadius: CGFloat = 0.06,
+		pipForceSquare: Bool = false,
+		pipForceLandscape: Bool = false,
 		cameraRatios: [String: MultiCamClient.AspectRatio] = [:],
 		overlaySizes: [String: CGFloat] = [:],
 		screenAspectRatio: CGFloat = 0.46
 	) -> [(camera: MultiCamClient.CameraID, rect: CGRect)] {
-		let layout = presetToLayout(preset, cameras: cameras, pipPositions: pipPositions, pipCornerRadius: pipCornerRadius, cameraRatios: cameraRatios, overlaySizes: overlaySizes, screenAspectRatio: screenAspectRatio)
+		let layout = presetToLayout(preset, cameras: cameras, pipPositions: pipPositions, pipCornerRadius: pipCornerRadius, pipForceSquare: pipForceSquare, pipForceLandscape: pipForceLandscape, cameraRatios: cameraRatios, overlaySizes: overlaySizes, screenAspectRatio: screenAspectRatio)
 		guard case .custom(let custom) = layout else { return [] }
 		return cameras.compactMap { cam in
 			guard let rect = custom.frames[cam] else { return nil }
