@@ -44,6 +44,9 @@ extension MultiCamClient: DependencyKey {
 			setPiPOverlayPosition: { camera, position in
 				await actor.setPiPOverlayPosition(camera: camera, position: position)
 			},
+			setPiPGestureCallbacks: { callbacks in
+				await actor.setPiPGestureCallbacks(callbacks)
+			},
 			startRecording: { configuration in
 				try await actor.startRecording(configuration)
 			},

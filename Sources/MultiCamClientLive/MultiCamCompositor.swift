@@ -81,6 +81,15 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 	var borderWidth: Float = 0        // in normalized viewport space
 	var borderColor: SIMD4<Float> = SIMD4<Float>(1, 1, 1, 1)  // RGBA
 
+	// MARK: - PiP Gesture State
+
+	/// Callback bundle for PiP drag/pinch. Defaults to `.none` (no-op).
+	private var callbacks: MultiCamClient.PiPGestureCallbacks = .none
+	/// Per-recognizer state holders (one per gesture). Keep state off the compositor
+	/// itself so simultaneous gestures on different PiPs don't cross-talk.
+	private let dragCoordinator = PiPDragCoordinator()
+	private let pinchCoordinator = PiPPinchCoordinator()
+
 	// MARK: - Init
 
 	static func create() -> MultiCamCompositor? {
@@ -133,7 +142,7 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		mtkView.colorPixelFormat = .bgra8Unorm
 		mtkView.isPaused = true
 		mtkView.enableSetNeedsDisplay = true
-		mtkView.isUserInteractionEnabled = false  // Let touches pass through to parent
+		mtkView.isUserInteractionEnabled = false  // Touches must reach the compositor (parent), not the MTKView.
 		// Match the display's native refresh rate (120 Hz on ProMotion devices). The default
 		// is 60 fps even on 120 Hz displays. Requires the host app to set
 		// `CADisableMinimumFrameDurationOnPhone = true` in Info.plist to actually unlock 120 Hz.
@@ -151,6 +160,18 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 			mtkView.leadingAnchor.constraint(equalTo: leadingAnchor),
 			mtkView.trailingAnchor.constraint(equalTo: trailingAnchor),
 		])
+
+		// Enable hit-testing for PiP gesture recognizers attached below.
+		isUserInteractionEnabled = true
+		dragCoordinator.compositor = self
+		pinchCoordinator.compositor = self
+		let pan = UIPanGestureRecognizer(target: dragCoordinator, action: #selector(PiPDragCoordinator.handle(_:)))
+		pan.maximumNumberOfTouches = 1
+		pan.delegate = self
+		addGestureRecognizer(pan)
+		let pinch = UIPinchGestureRecognizer(target: pinchCoordinator, action: #selector(PiPPinchCoordinator.handle(_:)))
+		pinch.delegate = self
+		addGestureRecognizer(pinch)
 
 		NotificationCenter.default.addObserver(
 			forName: UIApplication.didReceiveMemoryWarningNotification,
@@ -226,12 +247,21 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 	/// running the full layout pipeline. Must be called on the main thread.
 	@MainActor
 	func updateOverlayOrigin(camera: MultiCamClient.CameraID, origin: CGPoint) {
+		guard let current = currentViewport(for: camera) else { return }
+		applyViewportRect(camera: camera, rect: CGRect(origin: origin, size: current.rect.size))
+	}
+
+	/// Generalized fast-path: replace one viewport's full rect (origin + size). Used by
+	/// the gesture pipeline (drag + pinch) to push a clamped frame without rebuilding
+	/// the whole layout. Must be called on the main thread.
+	@MainActor
+	func applyViewportRect(camera: MultiCamClient.CameraID, rect: CGRect) {
 		_renderState.withLock { state in
 			guard let idx = state.viewports.firstIndex(where: { $0.cameraID == camera }) else { return }
 			let old = state.viewports[idx]
 			state.viewports[idx] = LayoutEngine.CameraViewport(
 				cameraID: old.cameraID,
-				rect: CGRect(origin: origin, size: old.rect.size),
+				rect: rect,
 				zOrder: old.zOrder,
 				cornerRadius: old.cornerRadius
 			)
@@ -239,6 +269,36 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		_needsDraw.withLock { $0 = true }
 		mtkView.setNeedsDisplay()
 	}
+
+	/// Replace (or clear, with `.none`) the gesture-callback bundle the compositor
+	/// uses to coordinate PiP drag/pinch with the host app.
+	@MainActor
+	func setGestureCallbacks(_ callbacks: MultiCamClient.PiPGestureCallbacks) {
+		self.callbacks = callbacks
+	}
+
+	/// Read a snapshot of the current viewport for `camera`, or nil if not present.
+	fileprivate func currentViewport(for camera: MultiCamClient.CameraID) -> LayoutEngine.CameraViewport? {
+		_renderState.withLock { state in
+			state.viewports.first(where: { $0.cameraID == camera })
+		}
+	}
+
+	/// Hit-test a touch point (in compositor view coords) against current viewports,
+	/// returning the top-most camera (highest zOrder) whose normalized rect contains it.
+	fileprivate func cameraAtTouch(_ point: CGPoint) -> MultiCamClient.CameraID? {
+		guard bounds.width > 0, bounds.height > 0 else { return nil }
+		let normalized = CGPoint(x: point.x / bounds.width, y: point.y / bounds.height)
+		let viewports = _renderState.withLock { $0.viewports }
+		// Top-most first.
+		for vp in viewports.sorted(by: { $0.zOrder > $1.zOrder }) {
+			if vp.rect.contains(normalized) { return vp.cameraID }
+		}
+		return nil
+	}
+
+	/// Look up the active callback bundle from the compositor (for coordinator use).
+	fileprivate var gestureCallbacks: MultiCamClient.PiPGestureCallbacks { callbacks }
 
 	func configureRecordingOutput(size: CGSize) {
 		recordingOutputSize = size
@@ -526,6 +586,133 @@ extension MultiCamCompositor: MTKViewDelegate {
 
 		commandBuffer.present(drawable)
 		commandBuffer.commit()
+	}
+}
+
+// MARK: - UIGestureRecognizerDelegate
+
+extension MultiCamCompositor: UIGestureRecognizerDelegate {
+
+	func gestureRecognizer(
+		_ gestureRecognizer: UIGestureRecognizer,
+		shouldReceive touch: UITouch
+	) -> Bool {
+		let point = touch.location(in: self)
+		guard let cam = cameraAtTouch(point) else { return false }
+		return callbacks.isCameraInteractive(cam)
+	}
+
+	func gestureRecognizer(
+		_ gestureRecognizer: UIGestureRecognizer,
+		shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer
+	) -> Bool {
+		// Allow our own pan + pinch to fire together on the same PiP overlay; reject
+		// simultaneity with foreign recognizers (e.g., the parent container's lens-zoom
+		// pinch). The parent restricts itself to the primary fullscreen viewport, so
+		// in PiP mode the two never compete on the same touch anyway.
+		return gestureRecognizer.view == self && other.view == self
+	}
+}
+
+// MARK: - Gesture Coordinators
+
+/// Per-recognizer drag state. Held by the compositor; isolated from compositor's
+/// shared state so simultaneous gestures on different PiPs don't cross-talk.
+private final class PiPDragCoordinator: NSObject {
+	weak var compositor: MultiCamCompositor?
+	var camera: MultiCamClient.CameraID?
+	var startRect: CGRect = .zero
+
+	@objc func handle(_ gr: UIPanGestureRecognizer) {
+		guard let comp = compositor else { return }
+		switch gr.state {
+		case .began:
+			guard let cam = comp.cameraAtTouch(gr.location(in: comp)),
+				  let vp = comp.currentViewport(for: cam) else {
+				gr.state = .failed
+				return
+			}
+			camera = cam
+			startRect = vp.rect
+		case .changed:
+			guard let cam = camera else { return }
+			guard comp.currentViewport(for: cam) != nil else {
+				// Camera disappeared mid-gesture (disconnect / mode switch). Cancel.
+				gr.state = .cancelled
+				return
+			}
+			let bounds = comp.bounds
+			guard bounds.width > 0, bounds.height > 0 else { return }
+			let t = gr.translation(in: comp)
+			let proposedOrigin = CGPoint(
+				x: startRect.origin.x + t.x / bounds.width,
+				y: startRect.origin.y + t.y / bounds.height
+			)
+			let proposed = CGRect(origin: proposedOrigin, size: startRect.size)
+			let clamped = comp.gestureCallbacks.clampFrame(cam, proposed)
+			comp.applyViewportRect(camera: cam, rect: clamped)
+			comp.gestureCallbacks.onLiveUpdate(cam, clamped, .drag)
+		case .ended:
+			guard let cam = camera else { return }
+			let final = comp.currentViewport(for: cam)?.rect ?? startRect
+			comp.gestureCallbacks.onCommit(cam, final, .drag)
+			camera = nil
+		case .cancelled, .failed:
+			camera = nil
+		default:
+			break
+		}
+	}
+}
+
+/// Per-recognizer pinch state. Independent from drag coordinator; both can fire
+/// concurrently on the same PiP (combined drag + resize gesture).
+private final class PiPPinchCoordinator: NSObject {
+	weak var compositor: MultiCamCompositor?
+	var camera: MultiCamClient.CameraID?
+	var startRect: CGRect = .zero
+
+	@objc func handle(_ gr: UIPinchGestureRecognizer) {
+		guard let comp = compositor else { return }
+		switch gr.state {
+		case .began:
+			guard let cam = comp.cameraAtTouch(gr.location(in: comp)),
+				  let vp = comp.currentViewport(for: cam) else {
+				gr.state = .failed
+				return
+			}
+			camera = cam
+			startRect = vp.rect
+		case .changed:
+			guard let cam = camera else { return }
+			guard comp.currentViewport(for: cam) != nil else {
+				gr.state = .cancelled
+				return
+			}
+			let scale = max(0.01, gr.scale)
+			let newW = startRect.width * scale
+			let newH = startRect.height * scale
+			let cx = startRect.midX
+			let cy = startRect.midY
+			let proposed = CGRect(
+				x: cx - newW / 2,
+				y: cy - newH / 2,
+				width: newW,
+				height: newH
+			)
+			let clamped = comp.gestureCallbacks.clampFrame(cam, proposed)
+			comp.applyViewportRect(camera: cam, rect: clamped)
+			comp.gestureCallbacks.onLiveUpdate(cam, clamped, .pinch)
+		case .ended:
+			guard let cam = camera else { return }
+			let final = comp.currentViewport(for: cam)?.rect ?? startRect
+			comp.gestureCallbacks.onCommit(cam, final, .pinch)
+			camera = nil
+		case .cancelled, .failed:
+			camera = nil
+		default:
+			break
+		}
 	}
 }
 #endif

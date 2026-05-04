@@ -25,6 +25,7 @@ actor MultiCamClientActor {
 	private var currentLayout: MultiCamClient.Layout = .grid(.init())
 	private var activeCameras: [MultiCamClient.CameraID] = []
 	private var isRecording = false
+	private var pipGestureCallbacks: MultiCamClient.PiPGestureCallbacks = .none
 
 	private var eventContinuations: [UUID: AsyncStream<MultiCamClient.Event>.Continuation] = [:]
 	private var pixelBufferContinuations: [MultiCamClient.CameraID: [UUID: AsyncStream<PhotoCaptureClient.PixelBufferWrapper>.Continuation]] = [:]
@@ -145,12 +146,16 @@ actor MultiCamClientActor {
 		// FIX: Compositor uses actual active cameras (not requested), in case some were dropped
 		let actualCameras = activeCameras
 		let layout = currentLayout
+		let savedCallbacks = pipGestureCallbacks
 		let comp = await MainActor.run {
 			let c = MultiCamCompositor.create()
 			// setLayout first (may override _cameras for stale custom layouts),
 			// then setCameras to restore the correct camera list and recompute viewports.
 			c?.setLayout(layout)
 			c?.setCameras(actualCameras)
+			// Re-apply persisted gesture callbacks so the consumer doesn't have to
+			// re-install them on every session restart.
+			c?.setGestureCallbacks(savedCallbacks)
 			return c
 		}
 		self.compositor = comp
@@ -274,6 +279,15 @@ actor MultiCamClientActor {
 		await MainActor.run {
 			comp?.updateOverlayOrigin(camera: camera, origin: position)
 		}
+	}
+
+	/// Install (or replace) the gesture-callback bundle the compositor uses for PiP
+	/// drag/pinch. Persisted as actor state so it survives session restart — the new
+	/// compositor created in `startSession` automatically picks them up.
+	func setPiPGestureCallbacks(_ callbacks: MultiCamClient.PiPGestureCallbacks) async {
+		pipGestureCallbacks = callbacks
+		let comp = compositor
+		await MainActor.run { comp?.setGestureCallbacks(callbacks) }
 	}
 
 	func setTorch(mode: MultiCamClient.TorchMode) {

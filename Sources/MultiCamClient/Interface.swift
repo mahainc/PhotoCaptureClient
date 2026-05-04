@@ -86,6 +86,13 @@ public struct MultiCamClient: Sendable {
 	///   - position: Normalized top-left origin in 0...1 viewport space.
 	public var setPiPOverlayPosition: @Sendable (_ camera: CameraID, _ position: CGPoint) async -> Void = { _, _ in }
 
+	/// Install (or replace, or clear) the gesture-callback bundle the Metal compositor uses
+	/// for PiP drag/pinch. Idempotent — last write wins. Persisted across session restarts:
+	/// the actor stores the callbacks and re-applies them whenever a fresh compositor is
+	/// created in `startSession`. Call once at app start (or after authorization), not per
+	/// `cameraConnected`.
+	public var setPiPGestureCallbacks: @Sendable (_ callbacks: PiPGestureCallbacks) async -> Void = { _ in }
+
 	// MARK: - Recording
 
 	/// Start recording video from all active cameras.
