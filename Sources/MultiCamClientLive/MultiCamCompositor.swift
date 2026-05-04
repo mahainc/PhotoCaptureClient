@@ -134,6 +134,14 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		mtkView.isPaused = true
 		mtkView.enableSetNeedsDisplay = true
 		mtkView.isUserInteractionEnabled = false  // Let touches pass through to parent
+		// Match the display's native refresh rate (120 Hz on ProMotion devices). The default
+		// is 60 fps even on 120 Hz displays. Requires the host app to set
+		// `CADisableMinimumFrameDurationOnPhone = true` in Info.plist to actually unlock 120 Hz.
+		if #available(iOS 15.0, *) {
+			mtkView.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+		} else {
+			mtkView.preferredFramesPerSecond = 120
+		}
 		self.mtkView = mtkView
 
 		super.init(frame: .zero)
