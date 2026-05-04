@@ -78,6 +78,14 @@ public struct MultiCamClient: Sendable {
 	///   - colorRGBA: Border color as (r, g, b, a) with values 0-1
 	public var setPiPBorder: @Sendable (_ width: Float, _ r: Float, _ g: Float, _ b: Float) async -> Void = { _, _, _, _ in }
 
+	/// Fast-path live update of a PiP overlay's origin during drag.
+	/// Bypasses the full layout pipeline (no event broadcast, no full viewport recompute).
+	/// The canonical layout should still be committed via `setLayout` on drag end.
+	/// - Parameters:
+	///   - camera: The PiP overlay camera to move.
+	///   - position: Normalized top-left origin in 0...1 viewport space.
+	public var setPiPOverlayPosition: @Sendable (_ camera: CameraID, _ position: CGPoint) async -> Void = { _, _ in }
+
 	// MARK: - Recording
 
 	/// Start recording video from all active cameras.

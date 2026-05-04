@@ -217,6 +217,25 @@ final class MultiCamCompositor: UIView, @unchecked Sendable {
 		_renderState.withLock { $0.viewports = viewports }
 	}
 
+	/// Fast-path: replace only the affected viewport's origin and request a redraw.
+	/// Used by `MultiCamClient.setPiPOverlayPosition` for live drag updates without
+	/// running the full layout pipeline. Must be called on the main thread.
+	@MainActor
+	func updateOverlayOrigin(camera: MultiCamClient.CameraID, origin: CGPoint) {
+		_renderState.withLock { state in
+			guard let idx = state.viewports.firstIndex(where: { $0.cameraID == camera }) else { return }
+			let old = state.viewports[idx]
+			state.viewports[idx] = LayoutEngine.CameraViewport(
+				cameraID: old.cameraID,
+				rect: CGRect(origin: origin, size: old.rect.size),
+				zOrder: old.zOrder,
+				cornerRadius: old.cornerRadius
+			)
+		}
+		_needsDraw.withLock { $0 = true }
+		mtkView.setNeedsDisplay()
+	}
+
 	func configureRecordingOutput(size: CGSize) {
 		recordingOutputSize = size
 		let attrs: [String: Any] = [

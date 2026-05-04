@@ -267,6 +267,15 @@ actor MultiCamClientActor {
 		}
 	}
 
+	/// Fast-path live origin update for a PiP overlay during drag.
+	/// Skips event broadcast and full layout recompute; canonical state is the caller's responsibility.
+	func setPiPOverlayPosition(camera: MultiCamClient.CameraID, position: CGPoint) async {
+		let comp = compositor
+		await MainActor.run {
+			comp?.updateOverlayOrigin(camera: camera, origin: position)
+		}
+	}
+
 	func setTorch(mode: MultiCamClient.TorchMode) {
 		delegate.setTorch(mode: mode)
 		logger("Torch set to \(mode.rawValue)")
