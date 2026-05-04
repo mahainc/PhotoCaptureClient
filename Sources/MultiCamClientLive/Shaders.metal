@@ -74,18 +74,16 @@ fragment float4 multiCamFragment(CameraVertexOut in [[stage_in]],
     float minDim = min(vpPixelW, vpPixelH);
     float radiusPixels = cornerRadius * minDim;
 
-    float dist = 0.0;
-    bool hasCornerRadius = cornerRadius > 0.0;
-
-    if (hasCornerRadius) {
-        float r = min(radiusPixels, minDim * 0.5);
-        float2 d = abs(pixelPos - pixelCenter) - (pixelHalfSize - r);
-        dist = length(max(d, 0.0)) - r;
-        dist += min(max(d.x, d.y), 0.0);
-    } else {
-        float edgeDist = min(min(p.x, 1.0 - p.x), min(p.y, 1.0 - p.y));
-        dist = -edgeDist * minDim; // scale to pixel space
-    }
+    // Unified rounded-rect SDF in shader-pixel space (axis-scaled by pixelAspectRatio
+    // so the same physical-pixel border thickness is achieved on every edge). When r=0
+    // this degrades cleanly to the standard axis-aligned rectangle SDF — using a single
+    // formula avoids the previous asymmetric-border bug where the cornerRadius=0 branch
+    // measured edge distance in unscaled normalized space and produced borders thicker
+    // on the long axis of any non-square viewport.
+    float r = min(radiusPixels, minDim * 0.5);
+    float2 d = abs(pixelPos - pixelCenter) - (pixelHalfSize - r);
+    float dist = length(max(d, 0.0)) - r;
+    dist += min(max(d.x, d.y), 0.0);
 
     // Outside shape — discard
     if (dist > 0.5) {  // half-pixel tolerance for anti-aliasing
