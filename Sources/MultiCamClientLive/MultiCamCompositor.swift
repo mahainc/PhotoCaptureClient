@@ -618,6 +618,7 @@ extension MultiCamCompositor: UIGestureRecognizerDelegate {
 
 /// Per-recognizer drag state. Held by the compositor; isolated from compositor's
 /// shared state so simultaneous gestures on different PiPs don't cross-talk.
+@MainActor
 private final class PiPDragCoordinator: NSObject {
 	weak var compositor: MultiCamCompositor?
 	var camera: MultiCamClient.CameraID?
@@ -667,6 +668,7 @@ private final class PiPDragCoordinator: NSObject {
 
 /// Per-recognizer pinch state. Independent from drag coordinator; both can fire
 /// concurrently on the same PiP (combined drag + resize gesture).
+@MainActor
 private final class PiPPinchCoordinator: NSObject {
 	weak var compositor: MultiCamCompositor?
 	var camera: MultiCamClient.CameraID?
