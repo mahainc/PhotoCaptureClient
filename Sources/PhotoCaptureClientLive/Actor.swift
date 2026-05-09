@@ -101,10 +101,6 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 		if session.canAddOutput(videoOutput) {
 			session.addOutput(videoOutput)
 			self.videoDataOutput = videoOutput
-			// Rotate frames to portrait so YOLO bounding boxes are in portrait coordinates
-			if let connection = videoOutput.connection(with: .video) {
-				connection.videoRotationAngle = 90
-			}
 		}
 
 		// Cap camera frame delivery to 30fps to reduce CPU load.
@@ -121,6 +117,32 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 		self.photoOutput = output
 		self.currentDevice = device
 		self.currentInput = input
+
+		// Apply rotation/mirroring AFTER commitConfiguration — connections aren't fully
+		// wired before commit on iOS 17+, and unsupported angles silently no-op without
+		// the explicit support check.
+		applyConnectionOrientation(position: position)
+	}
+
+	/// Force every active output connection into portrait + mirror the front camera
+	/// so the preview, video frames, and captured photo all share orientation.
+	/// Called after `configureSession` and after every `switchCamera` so the input
+	/// swap doesn't reset rotation back to the sensor default.
+	private func applyConnectionOrientation(position: PhotoCaptureClient.CameraPosition) {
+		let mirror = position == .front
+		let connections: [AVCaptureConnection?] = [
+			videoDataOutput?.connection(with: .video),
+			photoOutput?.connection(with: .video),
+		]
+		for case let connection? in connections {
+			if connection.isVideoRotationAngleSupported(90) {
+				connection.videoRotationAngle = 90
+			}
+			if connection.isVideoMirroringSupported {
+				connection.automaticallyAdjustsVideoMirroring = false
+				connection.isVideoMirrored = mirror
+			}
+		}
 	}
 
 	func startRunning() {
@@ -167,6 +189,8 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 
 		self.currentDevice = newDevice
 		self.currentInput = newInput
+
+		applyConnectionOrientation(position: position)
 	}
 
 	func capturePhoto(settings: PhotoCaptureClient.PhotoSettings) {
