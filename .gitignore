@@ -4,6 +4,8 @@ DerivedData/
 *.xcodeproj/
 *.xcworkspace/
 xcuserdata/
+.DS_Store
+Package.resolved
 
 # YOLO model source files (only the bundled .mlpackage in Resources/ is committed)
 *.pt
