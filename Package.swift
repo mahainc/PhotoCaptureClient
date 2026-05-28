@@ -17,11 +17,11 @@ let package = Package(
     dependencies: [
         .package(
             url: "https://github.com/pointfreeco/swift-composable-architecture.git",
-            branch: "main"
+            from: "1.25.5"
         ),
         .package(
             url: "https://github.com/ultralytics/yolo-ios-app.git",
-            branch: "main"
+            from: "8.8.7"
         ),
     ],
     targets: [

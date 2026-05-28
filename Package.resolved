@@ -1,5 +1,5 @@
 {
-  "originHash" : "69bfb81bf56d3bef0f34d9ce059ea2ba7861fa3de8ee89cc1dcb25af18b5a858",
+  "originHash" : "a6319e716645c10d01652fd6b5701a1b3dbf12c0620e9949c56d804e4401433d",
   "pins" : [
     {
       "identity" : "combine-schedulers",
@@ -42,8 +42,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/pointfreeco/swift-composable-architecture.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "2fc6ed2713521003a5e304bf991ebfd9cfa9f79e"
+        "revision" : "1eaa6fa2ee57ac42843283b9fd3457af408c858d",
+        "version" : "1.25.5"
       }
     },
     {
@@ -132,8 +132,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/ultralytics/yolo-ios-app.git",
       "state" : {
-        "branch" : "main",
-        "revision" : "ff2b9d910d4ea40dc4f151ecbf9f5319eefeed35"
+        "revision" : "44d82bf1fdcc7c605dacc58ee938878bb1276abd",
+        "version" : "8.8.7"
       }
     },
     {
