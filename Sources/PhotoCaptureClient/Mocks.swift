@@ -1,6 +1,10 @@
 import Dependencies
 import Foundation
-import QuartzCore
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 // MARK: - Dependency Registration
 
@@ -26,6 +30,18 @@ private enum MockConstants {
 	static let captureDelayNanoseconds: UInt64 = 300_000_000     // 300ms
 }
 
+// MARK: - Mock Helpers
+
+#if os(iOS)
+private func _mockPreviewView() async -> PhotoCaptureClient.PreviewView {
+	await MainActor.run { PhotoCaptureClient.PreviewView(view: UIView()) }
+}
+#else
+private func _mockPreviewView() async -> PhotoCaptureClient.PreviewView {
+	await MainActor.run { PhotoCaptureClient.PreviewView(view: NSView()) }
+}
+#endif
+
 // MARK: - Mock Implementations
 
 extension PhotoCaptureClient {
@@ -38,10 +54,13 @@ extension PhotoCaptureClient {
 		setFlashMode: { _ in },
 		focus: { _ in },
 		setZoomFactor: { _ in },
+		setVisualZoom: { _, _, _ in },
 		requestAuthorization: { .authorized },
 		authorizationStatus: { .authorized },
 		events: { AsyncStream { _ in } },
-		previewLayer: { PreviewLayer(layer: CALayer()) }
+		pixelBufferStream: { AsyncStream { _ in } },
+		previewView: { await _mockPreviewView() },
+		updateOverlays: { _ in }
 	)
 
 	/// Returns realistic mock data with small delays to simulate real behavior.
@@ -65,6 +84,7 @@ extension PhotoCaptureClient {
 		setFlashMode: { _ in },
 		focus: { _ in },
 		setZoomFactor: { _ in },
+		setVisualZoom: { _, _, _ in },
 		requestAuthorization: { .authorized },
 		authorizationStatus: { .authorized },
 		events: {
@@ -75,7 +95,9 @@ extension PhotoCaptureClient {
 				}
 			}
 		},
-		previewLayer: { PreviewLayer(layer: CALayer()) }
+		pixelBufferStream: { AsyncStream { _ in } },
+		previewView: { await _mockPreviewView() },
+		updateOverlays: { _ in }
 	)
 
 	/// Throws errors for operations that can fail.
@@ -97,6 +119,7 @@ extension PhotoCaptureClient {
 		setZoomFactor: { _ in
 			throw PhotoCaptureClient.Error.zoomFactorOutOfRange(min: 1.0, max: 10.0)
 		},
+		setVisualZoom: { _, _, _ in },
 		requestAuthorization: { .denied },
 		authorizationStatus: { .denied },
 		events: {
@@ -108,6 +131,8 @@ extension PhotoCaptureClient {
 				}
 			}
 		},
-		previewLayer: { PreviewLayer(layer: CALayer()) }
+		pixelBufferStream: { AsyncStream { _ in } },
+		previewView: { await _mockPreviewView() },
+		updateOverlays: { _ in }
 	)
 }

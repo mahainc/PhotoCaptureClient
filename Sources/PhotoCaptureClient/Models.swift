@@ -1,7 +1,14 @@
 import Foundation
 import CoreGraphics
+import CoreVideo
 import CasePaths
 import QuartzCore
+import simd
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 // MARK: - Photo
 
@@ -105,6 +112,9 @@ extension PhotoCaptureClient {
 		case willCapturePhoto
 		case didCapturePhoto
 		case captureCompleted
+
+		// Zoom
+		case zoomChanged(CGFloat)
 	}
 }
 
@@ -121,20 +131,127 @@ extension PhotoCaptureClient {
 	}
 }
 
-// MARK: - PreviewLayer
+// MARK: - PreviewView
 
 extension PhotoCaptureClient {
-	/// A Sendable wrapper around AVCaptureVideoPreviewLayer (a CALayer subclass).
-	/// CALayer is not Sendable, so this wrapper enables crossing isolation boundaries.
-	public final class PreviewLayer: @unchecked Sendable, Equatable {
-		public let layer: CALayer
+	/// A Sendable wrapper around a UIView (Metal-backed camera preview).
+	/// UIView is not Sendable, so this wrapper enables crossing isolation boundaries.
+	public final class PreviewView: @unchecked Sendable, Equatable {
+		#if os(iOS)
+		public let view: UIView
+		#else
+		public let view: NSView
+		#endif
 
-		public init(layer: CALayer) {
-			self.layer = layer
+		/// Aspect-fill UV scale — how much of the texture is visible (1.0 = full, <1.0 = cropped).
+		/// Updated by the renderer whenever drawable or texture size changes. Read on main thread.
+		public var uvScale: SIMD2<Float> = SIMD2<Float>(1, 1)
+
+		/// Aspect-fill UV offset — the origin offset of the visible texture region.
+		/// Updated by the renderer whenever drawable or texture size changes. Read on main thread.
+		public var uvOffset: SIMD2<Float> = SIMD2<Float>(0, 0)
+
+		/// Visual zoom factor — updated by the renderer. 1.0 = no zoom.
+		public var visualZoomFactor: Float = 1.0
+		/// Visual zoom anchor X in screen UV space (0-1).
+		public var visualZoomAnchorX: Float = 0.5
+		/// Visual zoom anchor Y in screen UV space (0-1).
+		public var visualZoomAnchorY: Float = 0.5
+
+		#if os(iOS)
+		public init(view: UIView) {
+			self.view = view
+		}
+		#else
+		public init(view: NSView) {
+			self.view = view
+		}
+		#endif
+
+		/// Convert a normalized texture coordinate (0-1) to a view-relative coordinate (0-1),
+		/// accounting for aspect-fill cropping and visual zoom.
+		public func textureToView(x: Float, y: Float) -> (x: Float, y: Float) {
+			// First: aspect-fill mapping (texture UV → screen UV without zoom)
+			let screenX = (x - uvOffset.x) / uvScale.x
+			let screenY = (y - uvOffset.y) / uvScale.y
+			// Then: apply zoom transform (inverse of shader division → multiply)
+			let zoomedX = (screenX - visualZoomAnchorX) * visualZoomFactor + visualZoomAnchorX
+			let zoomedY = (screenY - visualZoomAnchorY) * visualZoomFactor + visualZoomAnchorY
+			return (x: zoomedX, y: zoomedY)
 		}
 
-		public static func == (lhs: PreviewLayer, rhs: PreviewLayer) -> Bool {
-			lhs.layer === rhs.layer
+		/// Convert a normalized texture size to a view-relative size, accounting for aspect-fill and zoom.
+		public func textureToViewSize(w: Float, h: Float) -> (w: Float, h: Float) {
+			return (w / uvScale.x * visualZoomFactor, h / uvScale.y * visualZoomFactor)
+		}
+
+		public static func == (lhs: PreviewView, rhs: PreviewView) -> Bool {
+			lhs.view === rhs.view
+		}
+	}
+}
+
+// MARK: - PixelBufferWrapper
+
+extension PhotoCaptureClient {
+	/// A Sendable wrapper around CVPixelBuffer for crossing isolation boundaries.
+	/// CVPixelBuffer is not Sendable, so this wrapper retains it and exposes metadata.
+	/// Follows the same pattern as `PreviewView`.
+	public final class PixelBufferWrapper: @unchecked Sendable {
+		/// The underlying pixel buffer. Retained for the lifetime of this wrapper.
+		public let pixelBuffer: CVPixelBuffer
+		public let width: Int
+		public let height: Int
+		public let bytesPerRow: Int
+		public let timestamp: Date
+
+		public init(
+			pixelBuffer: CVPixelBuffer,
+			width: Int,
+			height: Int,
+			bytesPerRow: Int,
+			timestamp: Date = .now
+		) {
+			self.pixelBuffer = pixelBuffer
+			self.width = width
+			self.height = height
+			self.bytesPerRow = bytesPerRow
+			self.timestamp = timestamp
+		}
+	}
+}
+
+// MARK: - OverlayRect
+
+extension PhotoCaptureClient {
+	/// A normalized overlay rectangle for drawing on the Metal preview.
+	/// Coordinates are in 0.0-1.0 space (top-left origin).
+	/// Color is RGBA with values in range [0.0, 1.0].
+	public struct OverlayRect: Sendable, Equatable {
+		public let x: Float
+		public let y: Float
+		public let width: Float
+		public let height: Float
+		public let label: String?
+		public let confidence: Float?
+		public let color: SIMD4<Float>
+
+		public init(
+			x: Float,
+			y: Float,
+			width: Float,
+			height: Float,
+			label: String? = nil,
+			confidence: Float? = nil,
+			color: SIMD4<Float> = SIMD4<Float>(0, 1, 0, 1)
+		) {
+			self.x = x
+			self.y = y
+			self.width = width
+			self.height = height
+			self.label = label
+			self.confidence = confidence
+			self.color = color
 		}
 	}
 }

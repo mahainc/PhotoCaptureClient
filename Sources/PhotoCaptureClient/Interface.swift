@@ -1,6 +1,10 @@
 import DependenciesMacros
 import Foundation
-import QuartzCore
+#if os(iOS)
+import UIKit
+#else
+import AppKit
+#endif
 
 /// A dependency client wrapping AVFoundation's photo capture APIs for use with TCA.
 ///
@@ -37,6 +41,13 @@ public struct PhotoCaptureClient: Sendable {
 
 	public var setZoomFactor: @Sendable (_ factor: CGFloat) async throws -> Void
 
+	/// Set visual zoom in the Metal shader (not AVFoundation).
+	/// - Parameters:
+	///   - factor: Zoom level (1.0 = no zoom, max ~5.0)
+	///   - anchorX: Normalized screen X coordinate of the zoom center (0-1)
+	///   - anchorY: Normalized screen Y coordinate of the zoom center (0-1)
+	public var setVisualZoom: @Sendable (_ factor: CGFloat, _ anchorX: CGFloat, _ anchorY: CGFloat) async -> Void = { _, _, _ in }
+
 	// MARK: - Authorization
 
 	public var requestAuthorization: @Sendable () async -> AuthorizationStatus = { .notDetermined }
@@ -47,7 +58,26 @@ public struct PhotoCaptureClient: Sendable {
 
 	public var events: @Sendable () async -> AsyncStream<Event> = { AsyncStream { _ in } }
 
+	// MARK: - Frame Delivery
+
+	/// Stream of pixel buffers from the camera. Used by ObjectDetectionClientLive for inference.
+	public var pixelBufferStream: @Sendable () async -> AsyncStream<PixelBufferWrapper> = { AsyncStream { _ in } }
+
 	// MARK: - Preview
 
-	public var previewLayer: @Sendable () async -> PreviewLayer = { PreviewLayer(layer: CALayer()) }
+	public var previewView: @Sendable () async -> PreviewView = {
+		await MainActor.run {
+			#if os(iOS)
+			PreviewView(view: UIView())
+			#else
+			PreviewView(view: NSView())
+			#endif
+		}
+	}
+
+	// MARK: - Overlay
+
+	/// Update bounding box overlays on the Metal preview. Pass empty array to clear.
+	/// Note: Updates are best-effort ordered (acceptable since each call fully replaces all overlays).
+	public var updateOverlays: @Sendable (_ overlays: [OverlayRect]) -> Void = { _ in }
 }

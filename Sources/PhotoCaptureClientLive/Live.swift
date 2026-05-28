@@ -27,6 +27,9 @@ extension PhotoCaptureClient: DependencyKey {
 			setZoomFactor: { factor in
 				try await actor.setZoomFactor(factor)
 			},
+			setVisualZoom: { factor, anchorX, anchorY in
+				await actor.setVisualZoom(factor: factor, anchorX: anchorX, anchorY: anchorY)
+			},
 			requestAuthorization: {
 				await actor.requestAuthorization()
 			},
@@ -36,8 +39,14 @@ extension PhotoCaptureClient: DependencyKey {
 			events: {
 				await actor.observeEvents()
 			},
-			previewLayer: {
-				await actor.getPreviewLayer()
+			pixelBufferStream: {
+				await actor.observePixelBuffers()
+			},
+			previewView: {
+				await actor.getPreviewView()
+			},
+			updateOverlays: { overlays in
+				Task { await actor.updateOverlays(overlays) }
 			}
 		)
 	}()

@@ -1,6 +1,15 @@
 @preconcurrency import AVFoundation
+import CoreMedia
 import PhotoCaptureClient
 import Foundation
+import os
+
+#if os(iOS)
+import UIKit
+import MetalKit
+#else
+import AppKit
+#endif
 
 // MARK: - Delegate
 
@@ -16,12 +25,32 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 	// Per-capture continuation — set before each capturePhoto call
 	var photoContinuation: CheckedContinuation<PhotoCaptureClient.Photo, any Swift.Error>?
 
+	// Frame delivery properties
+	private(set) var videoDataOutput: AVCaptureVideoDataOutput?
+	private let videoDataQueue = DispatchQueue(label: "PhotoCaptureDelegate.videoDataQueue")
+
+	// Thread-safe continuation for frame delivery.
+	// Written from actor context (observePixelBuffers), read from videoDataQueue (captureOutput).
+	private let _pixelBufferContinuation = OSAllocatedUnfairLock<AsyncStream<PhotoCaptureClient.PixelBufferWrapper>.Continuation?>(initialState: nil)
+
+	var pixelBufferContinuation: AsyncStream<PhotoCaptureClient.PixelBufferWrapper>.Continuation? {
+		get { _pixelBufferContinuation.withLock { $0 } }
+		set { _pixelBufferContinuation.withLock { $0 = newValue } }
+	}
+
+	// Throttling: only deliver a frame every 333ms (~3fps) for YOLO inference.
+	// 3fps is visually smooth for detection boxes while reducing ~40% inference CPU.
+	private let frameIntervalSeconds: CFTimeInterval = 0.333
+	private var lastFrameTime: CFTimeInterval = 0
+
+	// Metal renderer callback — receives every frame at full camera rate (no throttling)
+	var onFrame: ((_ pixelBuffer: CVPixelBuffer) -> Void)?
+
 	// Framework objects — owned by the delegate, never by the actor
 	private(set) var captureSession: AVCaptureSession?
 	private(set) var photoOutput: AVCapturePhotoOutput?
 	private(set) var currentDevice: AVCaptureDevice?
 	private(set) var currentInput: AVCaptureDeviceInput?
-	private(set) var videoPreviewLayer: AVCaptureVideoPreviewLayer?
 	private let sessionQueue = DispatchQueue(label: "PhotoCaptureDelegate.sessionQueue")
 
 	var isRunning: Bool {
@@ -62,17 +91,58 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 		}
 		session.addOutput(output)
 
-		session.commitConfiguration()
+		// Add video data output for frame delivery
+		let videoOutput = AVCaptureVideoDataOutput()
+		videoOutput.setSampleBufferDelegate(self, queue: videoDataQueue)
+		videoOutput.alwaysDiscardsLateVideoFrames = true
+		videoOutput.videoSettings = [
+			kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+		]
+		if session.canAddOutput(videoOutput) {
+			session.addOutput(videoOutput)
+			self.videoDataOutput = videoOutput
+		}
 
-		// Create preview layer
-		let preview = AVCaptureVideoPreviewLayer(session: session)
-		preview.videoGravity = .resizeAspectFill
+		// Cap camera frame delivery to 30fps to reduce CPU load.
+		// The Metal renderer draws on-demand per frame, so 30fps is sufficient for preview.
+		if let _ = try? device.lockForConfiguration() {
+			device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+			device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+			device.unlockForConfiguration()
+		}
+
+		session.commitConfiguration()
 
 		self.captureSession = session
 		self.photoOutput = output
 		self.currentDevice = device
 		self.currentInput = input
-		self.videoPreviewLayer = preview
+
+		// Apply rotation/mirroring AFTER commitConfiguration — connections aren't fully
+		// wired before commit on iOS 17+, and unsupported angles silently no-op without
+		// the explicit support check.
+		applyConnectionOrientation(position: position)
+	}
+
+	/// Force every active output connection into portrait + mirror the front camera
+	/// so the preview, video frames, and captured photo all share orientation.
+	/// Called after `configureSession` and after every `switchCamera` so the input
+	/// swap doesn't reset rotation back to the sensor default.
+	private func applyConnectionOrientation(position: PhotoCaptureClient.CameraPosition) {
+		let mirror = position == .front
+		let connections: [AVCaptureConnection?] = [
+			videoDataOutput?.connection(with: .video),
+			photoOutput?.connection(with: .video),
+		]
+		for case let connection? in connections {
+			if connection.isVideoRotationAngleSupported(90) {
+				connection.videoRotationAngle = 90
+			}
+			if connection.isVideoMirroringSupported {
+				connection.automaticallyAdjustsVideoMirroring = false
+				connection.isVideoMirrored = mirror
+			}
+		}
 	}
 
 	func startRunning() {
@@ -119,6 +189,8 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 
 		self.currentDevice = newDevice
 		self.currentInput = newInput
+
+		applyConnectionOrientation(position: position)
 	}
 
 	func capturePhoto(settings: PhotoCaptureClient.PhotoSettings) {
@@ -168,11 +240,14 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 			}
 		}
 		removeNotificationObservers()
+		pixelBufferContinuation?.finish()
+		pixelBufferContinuation = nil
+		videoDataOutput = nil
+		onFrame = nil
 		captureSession = nil
 		photoOutput = nil
 		currentDevice = nil
 		currentInput = nil
-		videoPreviewLayer = nil
 	}
 
 	// MARK: - Notification Observers
@@ -300,6 +375,40 @@ extension PhotoCaptureDelegate: AVCapturePhotoCaptureDelegate {
 	}
 }
 
+// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+
+extension PhotoCaptureDelegate: AVCaptureVideoDataOutputSampleBufferDelegate {
+	func captureOutput(
+		_ output: AVCaptureOutput,
+		didOutput sampleBuffer: CMSampleBuffer,
+		from connection: AVCaptureConnection
+	) {
+		guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+		// Deliver every frame to Metal renderer at full camera rate
+		onFrame?(pixelBuffer)
+
+		// Throttle: only deliver frames for detection inference at ~5fps
+		let now = CACurrentMediaTime()
+		guard now - lastFrameTime >= frameIntervalSeconds else { return }
+		lastFrameTime = now
+
+		let width = CVPixelBufferGetWidth(pixelBuffer)
+		let height = CVPixelBufferGetHeight(pixelBuffer)
+		let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+
+		let wrapper = PhotoCaptureClient.PixelBufferWrapper(
+			pixelBuffer: pixelBuffer,
+			width: width,
+			height: height,
+			bytesPerRow: bytesPerRow,
+			timestamp: .now
+		)
+
+		pixelBufferContinuation?.yield(wrapper)
+	}
+}
+
 // MARK: - Actor
 
 /// Plain actor that manages AVFoundation photo capture via a delegate.
@@ -309,6 +418,11 @@ actor PhotoCaptureClientActor {
 
 	private var currentPosition: PhotoCaptureClient.CameraPosition = .back
 	private var currentFlashMode: PhotoCaptureClient.FlashMode = .auto
+	#if os(iOS)
+	private var metalRenderer: MetalPreviewRenderer?
+	private var cachedPreviewView: PhotoCaptureClient.PreviewView?
+	private var currentVisualZoom: (factor: Float, anchorX: Float, anchorY: Float) = (1.0, 0.5, 0.5)
+	#endif
 	private var eventContinuations: [UUID: AsyncStream<PhotoCaptureClient.Event>.Continuation] = [:]
 
 	// MARK: - Init
@@ -343,6 +457,19 @@ actor PhotoCaptureClientActor {
 		logger("Configuring capture session")
 		try delegate.configureSession(position: currentPosition)
 		delegate.registerNotificationObservers()
+		#if os(iOS)
+		let renderer = await MainActor.run { MetalPreviewRenderer.create() }
+		self.metalRenderer = renderer
+		delegate.onFrame = { [weak renderer] pixelBuffer in
+			renderer?.enqueueFrame(pixelBuffer)
+		}
+		// Link renderer to cached preview view (if getPreviewView was called before startSession)
+		if let renderer, let cached = cachedPreviewView {
+			renderer.previewViewRef = cached
+		}
+		// Invalidate cached preview so next getPreviewView returns one with the new renderer
+		cachedPreviewView = nil
+		#endif
 		logger("Starting capture session")
 		delegate.startRunning()
 	}
@@ -353,6 +480,12 @@ actor PhotoCaptureClientActor {
 			return
 		}
 		logger("Stopping capture session")
+		delegate.pixelBufferContinuation?.finish()
+		delegate.pixelBufferContinuation = nil
+		#if os(iOS)
+		delegate.onFrame = nil
+		metalRenderer = nil
+		#endif
 		delegate.teardown()
 		for continuation in eventContinuations.values {
 			continuation.finish()
@@ -380,6 +513,12 @@ actor PhotoCaptureClientActor {
 		logger("Switching camera to \(position)")
 		try delegate.switchCamera(to: position)
 		currentPosition = position
+		#if os(iOS)
+		currentVisualZoom = (1.0, 0.5, 0.5)
+		let renderer = metalRenderer
+		await MainActor.run { renderer?.resetVisualZoom() }
+		yieldEvent(.zoomChanged(1.0))
+		#endif
 	}
 
 	func setFlashMode(_ mode: PhotoCaptureClient.FlashMode) {
@@ -395,6 +534,20 @@ actor PhotoCaptureClientActor {
 	func setZoomFactor(_ factor: CGFloat) async throws {
 		logger("Setting zoom factor to \(factor)")
 		try delegate.setZoomFactor(factor)
+	}
+
+	func setVisualZoom(factor: CGFloat, anchorX: CGFloat, anchorY: CGFloat) async {
+		#if os(iOS)
+		let clamped = Float(min(max(factor, 1.0), 5.0))
+		let clampedAX = Float(min(max(anchorX, 0.0), 1.0))
+		let clampedAY = Float(min(max(anchorY, 0.0), 1.0))
+		currentVisualZoom = (clamped, clampedAX, clampedAY)
+		let renderer = metalRenderer
+		await MainActor.run {
+			renderer?.setVisualZoom(factor: clamped, anchorX: clampedAX, anchorY: clampedAY)
+		}
+		yieldEvent(.zoomChanged(CGFloat(clamped)))
+		#endif
 	}
 
 	// MARK: - Authorization
@@ -424,14 +577,55 @@ actor PhotoCaptureClientActor {
 		eventContinuations.removeValue(forKey: id)
 	}
 
+	// MARK: - Frame Delivery
+
+	func observePixelBuffers() -> AsyncStream<PhotoCaptureClient.PixelBufferWrapper> {
+		return AsyncStream { continuation in
+			// The delegate writes directly into this continuation from the video data queue.
+			// Only one subscriber is supported at a time (last subscriber wins).
+			delegate.pixelBufferContinuation = continuation
+			continuation.onTermination = { [weak self] _ in
+				Task { await self?.clearPixelBufferContinuation() }
+			}
+		}
+	}
+
+	private func clearPixelBufferContinuation() {
+		delegate.pixelBufferContinuation = nil
+	}
+
 	// MARK: - Preview
 
-	func getPreviewLayer() -> PhotoCaptureClient.PreviewLayer {
-		if let layer = delegate.videoPreviewLayer {
-			return PhotoCaptureClient.PreviewLayer(layer: layer)
+	#if os(iOS)
+	func getPreviewView() -> PhotoCaptureClient.PreviewView {
+		if let cached = cachedPreviewView {
+			return cached
 		}
-		return PhotoCaptureClient.PreviewLayer(layer: CALayer())
+		let preview: PhotoCaptureClient.PreviewView
+		if let renderer = metalRenderer {
+			preview = PhotoCaptureClient.PreviewView(view: renderer)
+			renderer.previewViewRef = preview
+			// Sync current visual zoom state
+			preview.visualZoomFactor = currentVisualZoom.factor
+			preview.visualZoomAnchorX = currentVisualZoom.anchorX
+			preview.visualZoomAnchorY = currentVisualZoom.anchorY
+		} else {
+			preview = PhotoCaptureClient.PreviewView(view: UIView())
+		}
+		cachedPreviewView = preview
+		return preview
 	}
+
+	func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {
+		metalRenderer?.updateOverlays(overlays)
+	}
+	#else
+	func getPreviewView() -> PhotoCaptureClient.PreviewView {
+		return PhotoCaptureClient.PreviewView(view: NSView())
+	}
+
+	func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {}
+	#endif
 
 	// MARK: - Helpers
 
