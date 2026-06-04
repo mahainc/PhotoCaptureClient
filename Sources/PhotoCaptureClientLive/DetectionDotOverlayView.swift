@@ -16,10 +16,10 @@
     /// edge. To stay stable this view tracks its current target across frames (by transform-invariant
     /// texture-space center) and:
     ///   - resists switching unless a different object is clearly larger (`switchAreaRatio`),
-    ///   - holds through brief drop-outs of the current target (`holdDuration`),
-    ///   - smooths the dot position while tracking one object (`positionSmoothing`).
-    /// It still fades in/out as a target appears/disappears and glides between objects, and stays in
-    /// sync with the aspect-fill + zoom transform the boxes use.
+    ///   - holds — and keeps re-projecting — through brief drop-outs of the current target
+    ///     (`holdDuration`), unless a comparably-large object is already on screen.
+    /// New detections glide the dot; transform-only updates (pinch-zoom, layout) snap it so it tracks
+    /// the geometry crisply, exactly like the bounding boxes and labels.
     final class DetectionDotOverlayView: UIView {
 
         private enum Style {
@@ -33,13 +33,18 @@
             /// A challenger object must be at least this much larger (by on-screen area) than the
             /// current target before the dot switches to it. Kills flip-flop between near-equal boxes.
             static let switchAreaRatio: Float = 1.25
-            /// Max texture-space distance for a candidate to count as the *same* object as last frame.
-            static let sameObjectMaxDistance: Float = 0.18
+            /// Max texture-space distance for a candidate to count as the *same* object as last frame
+            /// (≈ one object's per-frame center drift; small enough not to grab a neighbouring object).
+            static let sameObjectMaxDistance: Float = 0.08
             /// How long to keep the dot on its last target after it drops out of the candidate set
             /// (bridges brief edge-clips / confidence dips of the nearest object).
             static let holdDuration: CFTimeInterval = 0.5
-            /// EMA factor applied to the dot position while tracking one object (damps box jitter).
-            static let positionSmoothing: CGFloat = 0.5
+        }
+
+        /// What triggered a relayout — new detection data vs. a re-projection of the existing data.
+        private enum RelayoutCause {
+            case detections  // fresh detection results: glide + advance the hold clock
+            case transform  // pinch-zoom / layout / activation: snap, don't touch the hold clock
         }
 
         /// A fully-visible detection considered for the dot, with both an identity key (texture-space
@@ -65,7 +70,7 @@
 
         // Cross-frame tracking state.
         private var lastTargetTexCenter: SIMD2<Float>?
-        private var lastDrawnPoint: CGPoint?
+        private var lastTargetArea: Float = 0
         private var lastSeenTime: CFTimeInterval = 0
 
         private var overlays: [PhotoCaptureClient.OverlayRect] = []
@@ -97,34 +102,35 @@
             fatalError("init(coder:) is not supported")
         }
 
-        /// Replace the overlays and transform, then reposition (animated). Call on the main thread.
+        /// Replace the overlays and transform with fresh detection data, then reposition (glide).
         func update(
             overlays: [PhotoCaptureClient.OverlayRect],
             transform: OverlayTransform
         ) {
             self.overlays = overlays
             self.overlayTransform = transform
-            relayout(animated: true)
+            relayout(cause: .detections)
         }
 
-        /// Update only the transform (aspect-fill / zoom changed), then reposition. Main thread.
+        /// Re-project under a new transform (aspect-fill / zoom changed) against the existing
+        /// detections — snap, don't treat it as a new sighting.
         func update(transform: OverlayTransform) {
             self.overlayTransform = transform
-            relayout(animated: true)
+            relayout(cause: .transform)
         }
 
-        /// Enable or disable the dot style. Repositions without animation.
+        /// Enable or disable the dot style. Repositions (snap) without advancing the hold clock.
         func setActive(_ active: Bool) {
             isActive = active
-            relayout(animated: false)
+            relayout(cause: .transform)
         }
 
         override func layoutSubviews() {
             super.layoutSubviews()
-            relayout(animated: false)
+            relayout(cause: .transform)
         }
 
-        private func relayout(animated: Bool) {
+        private func relayout(cause: RelayoutCause) {
             let size = bounds.size
             guard isActive, size.width > 0, size.height > 0 else {
                 hideDot()
@@ -136,16 +142,16 @@
 
             switch decideTarget(candidates: candidates, now: now) {
                 case .show(let candidate, let isSwitch):
-                    apply(candidate, isSwitch: isSwitch, animated: animated, now: now)
+                    apply(candidate, isSwitch: isSwitch, cause: cause, now: now)
                 case .hold:
-                    break  // Keep the dot where it is, still visible, until the grace window expires.
+                    holdInPlace(size: size)  // keep the dot glued to the held object, even under zoom
                 case .hide:
                     hideDot()
             }
         }
 
-        /// Map every fully-visible overlay to a `Candidate`. Skips boxes that aren't fully inside the
-        /// visible preview (same strict gate the bounding boxes use).
+        /// Map every fully-visible overlay to a `Candidate`, dropping degenerate (zero / non-finite
+        /// area) boxes so the area-ratio hysteresis can't collapse to "always switch".
         private func makeCandidates(size: CGSize) -> [Candidate] {
             overlays.compactMap { overlay in
                 guard
@@ -159,6 +165,8 @@
                 else {
                     return nil
                 }
+                let screenArea = rect.width * rect.height
+                guard screenArea.isFinite, screenArea > 0 else { return nil }
                 let centerX = rect.minX + rect.width * 0.5
                 let centerY = rect.minY + rect.height * 0.5
                 return Candidate(
@@ -166,7 +174,7 @@
                         overlay.x + overlay.width * 0.5,
                         overlay.y + overlay.height * 0.5
                     ),
-                    screenArea: rect.width * rect.height,
+                    screenArea: screenArea,
                     screenPoint: CGPoint(
                         x: CGFloat(centerX) * size.width,
                         y: CGFloat(centerY) * size.height
@@ -186,9 +194,10 @@
                 return withinHold(now) ? .hold : .hide
             }
             guard let current = continuation(in: candidates) else {
-                // The tracked object isn't in this frame's candidates.
-                if withinHold(now) {
-                    return .hold  // Bridge a brief edge-clip / confidence dip of the nearest object.
+                // Tracked object absent this frame. Only hold if it's worth waiting for — i.e. the
+                // best available alternative is smaller than what we were tracking; otherwise take it.
+                if withinHold(now), largest.screenArea < lastTargetArea {
+                    return .hold
                 }
                 return .show(largest, isSwitch: true)
             }
@@ -227,19 +236,19 @@
         private func apply(
             _ candidate: Candidate,
             isSwitch: Bool,
-            animated: Bool,
+            cause: RelayoutCause,
             now: CFTimeInterval
         ) {
             dot.backgroundColor = color(from: candidate.color)
-
-            let point = smoothedPoint(for: candidate, isSwitch: isSwitch)
+            let point = candidate.screenPoint
 
             if !wasShown {
                 // Appearing: place at the target and fade in (no slide from a stale position).
                 dot.center = point
                 wasShown = true
                 UIView.animate(withDuration: Style.fadeDuration) { self.dot.alpha = 1 }
-            } else if animated {
+            } else if cause == .detections {
+                // New detection moved/switched the target — glide.
                 UIView.animate(
                     withDuration: Style.moveDuration,
                     delay: 0,
@@ -248,28 +257,38 @@
                     self.dot.center = point
                 }
             } else {
+                // Transform/layout re-projection — snap so the dot tracks pinch-zoom crisply.
                 dot.center = point
             }
 
             lastTargetTexCenter = candidate.texCenter
-            lastDrawnPoint = point
-            lastSeenTime = now
+            lastTargetArea = candidate.screenArea
+            if cause == .detections {
+                lastSeenTime = now
+            }
         }
 
-        /// While tracking the same object, ease the point toward the new center to damp box jitter;
-        /// on a switch or first appearance, go straight to the target.
-        private func smoothedPoint(
-            for candidate: Candidate,
-            isSwitch: Bool
+        /// Keep a held dot glued to its (currently off-candidate) object by re-projecting the last
+        /// known texture-space center through the live transform, so a pinch-zoom during a hold still
+        /// moves the dot instead of freezing it in screen pixels.
+        private func holdInPlace(size: CGSize) {
+            guard let texCenter = lastTargetTexCenter else { return }
+            dot.center = projectedPoint(texCenter, size: size)
+        }
+
+        /// Project a texture-space point to view points through the aspect-fill + zoom transform —
+        /// the same mapping as `visibleScreenRect`, but for a single point (no full-box visibility
+        /// gate, since a held center may sit outside `[0, 1]`).
+        private func projectedPoint(
+            _ texCenter: SIMD2<Float>,
+            size: CGSize
         ) -> CGPoint {
-            guard !isSwitch, wasShown, let last = lastDrawnPoint else {
-                return candidate.screenPoint
-            }
-            let smoothing = Tuning.positionSmoothing
-            return CGPoint(
-                x: last.x + (candidate.screenPoint.x - last.x) * smoothing,
-                y: last.y + (candidate.screenPoint.y - last.y) * smoothing
-            )
+            let transform = overlayTransform
+            let baseX = (texCenter.x - transform.uvOffset.x) / transform.uvScale.x
+            let baseY = (texCenter.y - transform.uvOffset.y) / transform.uvScale.y
+            let screenX = (baseX - transform.zoomAnchorX) * transform.zoomFactor + transform.zoomAnchorX
+            let screenY = (baseY - transform.zoomAnchorY) * transform.zoomFactor + transform.zoomAnchorY
+            return CGPoint(x: CGFloat(screenX) * size.width, y: CGFloat(screenY) * size.height)
         }
 
         private func hideDot() {
