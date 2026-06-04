@@ -11,15 +11,14 @@
     /// back to center-proximity (the object you're aiming at) on devices/simulator without depth.
     /// Used by the `.centerDot` overlay style in place of bounding boxes.
     ///
-    /// The detection stream is a sequence of independent, noisy, identity-less snapshots (~3 fps,
-    /// fresh per-frame boxes, no tracking), so a naked per-frame argmin makes the dot flip between
-    /// near-equal objects and abandon the target whenever its box briefly clips a frame edge. To stay
-    /// stable this view tracks its current target across frames (by transform-invariant texture-space
-    /// center) and:
-    ///   - resists switching unless a different object is clearly nearer (`switchDepthFraction` /
+    /// Detections carry a stable per-object track ID (from the upstream multi-object tracker), so the
+    /// view ID-locks onto its current target and follows that identity across frames — falling back to
+    /// the transform-invariant texture-space center when no ID is present (untracked / depth-less). It:
+    ///   - resists switching unless a *different* object is clearly nearer (`switchDepthFraction` /
     ///     `switchProximityFraction`),
     ///   - holds — and keeps re-projecting — through brief drop-outs of the current target
-    ///     (`holdDuration`), unless a nearer object is already on screen.
+    ///     (`holdDuration`), unless a nearer object is already on screen,
+    ///   - smooths same-object motion with a 1€ filter (the tracker already damps box jitter upstream).
     /// New detections glide the dot; transform-only updates (pinch-zoom, layout) snap it so it tracks
     /// the geometry crisply, exactly like the bounding boxes and labels.
     final class DetectionDotOverlayView: UIView {
@@ -52,6 +51,11 @@
             /// How long to keep the dot on its last target after it drops out of the candidate set
             /// (bridges brief edge-clips / confidence dips of the nearest object).
             static let holdDuration: CFTimeInterval = 0.5
+            /// 1€ filter for same-object pointer smoothing: a low cutoff kills jitter when still, β
+            /// raises the cutoff with speed to cut lag. Conservative — the tracker's Kalman already
+            /// damps box jitter, so this only removes residual high-frequency noise.
+            static let smoothingMinCutoff: Float = 2.0
+            static let smoothingBeta: Float = 0.4
         }
 
         /// What triggered a relayout — new detection data vs. a re-projection of the existing data.
@@ -63,7 +67,11 @@
         /// A fully-visible detection considered for the dot, with both an identity key (texture-space
         /// center, transform-invariant) and on-screen geometry.
         private struct Candidate {
+            /// Stable identity from the upstream tracker (`nil` when untracked).
+            let trackID: UUID?
             let texCenter: SIMD2<Float>
+            /// Normalized (0-1) screen-space center, post aspect-fill + zoom.
+            let screenCenter: SIMD2<Float>
             let screenPoint: CGPoint
             let color: SIMD4<Float>
             /// Metric depth in metres (smaller = nearer); `nil` when depth couldn't be sampled.
@@ -78,6 +86,66 @@
             case hide
         }
 
+        /// A 1€ low-pass filter (Casiez et al., CHI 2012): an adaptive cutoff trades jitter for lag —
+        /// low cutoff (steady) kills jitter, higher cutoff (fast) cuts lag.
+        private struct OneEuroFilter {
+            let minCutoff: Float
+            let beta: Float
+            var derivativeCutoff: Float = 1
+            private var hasPrevious = false
+            private var previousValue: Float = 0
+            private var previousDerivative: Float = 0
+            private var previousTime: CFTimeInterval = 0
+
+            init(
+                minCutoff: Float,
+                beta: Float
+            ) {
+                self.minCutoff = minCutoff
+                self.beta = beta
+            }
+
+            mutating func reset(
+                to value: Float,
+                at time: CFTimeInterval
+            ) {
+                hasPrevious = true
+                previousValue = value
+                previousDerivative = 0
+                previousTime = time
+            }
+
+            mutating func filter(
+                _ value: Float,
+                at time: CFTimeInterval
+            ) -> Float {
+                guard hasPrevious else {
+                    reset(to: value, at: time)
+                    return value
+                }
+                let elapsed = Float(max(time - previousTime, 1e-4))
+                previousTime = time
+                let derivative = (value - previousValue) / elapsed
+                let derivativeAlpha = Self.alpha(cutoff: derivativeCutoff, deltaTime: elapsed)
+                let smoothedDerivative =
+                    derivativeAlpha * derivative + (1 - derivativeAlpha) * previousDerivative
+                previousDerivative = smoothedDerivative
+                let cutoff = minCutoff + beta * abs(smoothedDerivative)
+                let valueAlpha = Self.alpha(cutoff: cutoff, deltaTime: elapsed)
+                let smoothed = valueAlpha * value + (1 - valueAlpha) * previousValue
+                previousValue = smoothed
+                return smoothed
+            }
+
+            private static func alpha(
+                cutoff: Float,
+                deltaTime: Float
+            ) -> Float {
+                let tau = 1 / (2 * Float.pi * cutoff)
+                return 1 / (1 + tau / deltaTime)
+            }
+        }
+
         /// Whether the dot is drawn at all. Toggled by `PhotoCaptureClient.setOverlayStyle`
         /// (`true` only for `.centerDot`).
         private var isActive: Bool = false
@@ -85,12 +153,24 @@
         private var wasShown: Bool = false
 
         // Cross-frame tracking state.
+        /// The tracked target's stable track ID — the primary identity key (when present).
+        private var lastTargetTrackID: UUID?
         private var lastTargetTexCenter: SIMD2<Float>?
         /// The tracked target's last sampled depth (metres); `nil` if it had no depth.
         private var lastTargetDepth: Float?
         /// The tracked target's last screen-space center-proximity.
         private var lastTargetProximity: Float = 0
         private var lastSeenTime: CFTimeInterval = 0
+
+        // Per-axis 1€ smoothing of the selected object's center (same-object motion only).
+        private var smootherX = OneEuroFilter(
+            minCutoff: Tuning.smoothingMinCutoff,
+            beta: Tuning.smoothingBeta
+        )
+        private var smootherY = OneEuroFilter(
+            minCutoff: Tuning.smoothingMinCutoff,
+            beta: Tuning.smoothingBeta
+        )
 
         private var overlays: [PhotoCaptureClient.OverlayRect] = []
         private var overlayTransform = OverlayTransform()
@@ -161,7 +241,7 @@
 
             switch decideTarget(candidates: candidates, now: now) {
                 case .show(let candidate, let isSwitch):
-                    apply(candidate, isSwitch: isSwitch, cause: cause, now: now)
+                    apply(candidate, isSwitch: isSwitch, cause: cause, now: now, size: size)
                 case .hold:
                     holdInPlace(size: size)  // keep the dot glued to the held object, even under zoom
                 case .hide:
@@ -191,10 +271,12 @@
                 let proximityX = centerX - 0.5
                 let proximityY = centerY - 0.5
                 return Candidate(
+                    trackID: overlay.trackID,
                     texCenter: SIMD2<Float>(
                         overlay.x + overlay.width * 0.5,
                         overlay.y + overlay.height * 0.5
                     ),
+                    screenCenter: SIMD2<Float>(centerX, centerY),
                     screenPoint: CGPoint(
                         x: CGFloat(centerX) * size.width,
                         y: CGFloat(centerY) * size.height
@@ -273,8 +355,14 @@
                 return .show(best, isSwitch: true)
             }
 
-            // Keep the current object unless a different one is clearly nearer.
-            if best.texCenter != current.texCenter, isClearlyNearer(best, than: current) {
+            // Keep the current object unless a *different* one is clearly nearer.
+            let isDifferentObject: Bool
+            if let bestID = best.trackID, let currentID = current.trackID {
+                isDifferentObject = bestID != currentID
+            } else {
+                isDifferentObject = best.texCenter != current.texCenter
+            }
+            if isDifferentObject, isClearlyNearer(best, than: current) {
                 return .show(best, isSwitch: true)
             }
             return .show(current, isSwitch: false)
@@ -287,6 +375,13 @@
         /// The candidate that is the continuation of the current target — the nearest one (by
         /// texture-space center) to last frame's target, within `sameObjectMaxDistance`.
         private func continuation(in candidates: [Candidate]) -> Candidate? {
+            // Prefer an exact track-ID match: the tracker gives a stable identity, so this follows the
+            // same object even across large per-frame jumps and never grabs a neighbour. If the tracked
+            // ID is absent this frame, return nil so the hold / drop-out logic takes over.
+            if let lastID = lastTargetTrackID {
+                return candidates.first { $0.trackID == lastID }
+            }
+            // No track ID (untracked / depth-less path) — fall back to nearest texture-space center.
             guard let last = lastTargetTexCenter else { return nil }
             var best: Candidate?
             var bestDistance = Tuning.sameObjectMaxDistance * Tuning.sameObjectMaxDistance
@@ -306,36 +401,71 @@
             _ candidate: Candidate,
             isSwitch: Bool,
             cause: RelayoutCause,
-            now: CFTimeInterval
+            now: CFTimeInterval,
+            size: CGSize
         ) {
             dot.backgroundColor = color(from: candidate.color)
-            let point = candidate.screenPoint
+            let rawPoint = candidate.screenPoint
 
             if !wasShown {
                 // Appearing: place at the target and fade in (no slide from a stale position).
-                dot.center = point
+                resetSmoother(to: candidate.screenCenter, at: now)
+                dot.center = rawPoint
                 wasShown = true
                 UIView.animate(withDuration: Style.fadeDuration) { self.dot.alpha = 1 }
             } else if cause == .detections {
-                // New detection moved/switched the target — glide.
-                UIView.animate(
-                    withDuration: Style.moveDuration,
-                    delay: 0,
-                    options: [.beginFromCurrentState, .curveEaseInOut]
-                ) {
-                    self.dot.center = point
+                if isSwitch {
+                    // Switched to a different object — reset the smoother and glide cleanly to it.
+                    resetSmoother(to: candidate.screenCenter, at: now)
+                    UIView.animate(
+                        withDuration: Style.moveDuration,
+                        delay: 0,
+                        options: [.beginFromCurrentState, .curveEaseInOut]
+                    ) {
+                        self.dot.center = rawPoint
+                    }
+                } else {
+                    // Same object — damp residual jitter with the 1€ filter, then glide.
+                    let point = smoothedPoint(candidate.screenCenter, at: now, size: size)
+                    UIView.animate(
+                        withDuration: Style.moveDuration,
+                        delay: 0,
+                        options: [.beginFromCurrentState, .curveEaseInOut]
+                    ) {
+                        self.dot.center = point
+                    }
                 }
             } else {
                 // Transform/layout re-projection — snap so the dot tracks pinch-zoom crisply.
-                dot.center = point
+                resetSmoother(to: candidate.screenCenter, at: now)
+                dot.center = rawPoint
             }
 
             lastTargetTexCenter = candidate.texCenter
+            lastTargetTrackID = candidate.trackID
             lastTargetDepth = candidate.depth
             lastTargetProximity = candidate.proximity
             if cause == .detections {
                 lastSeenTime = now
             }
+        }
+
+        private func resetSmoother(
+            to center: SIMD2<Float>,
+            at time: CFTimeInterval
+        ) {
+            smootherX.reset(to: center.x, at: time)
+            smootherY.reset(to: center.y, at: time)
+        }
+
+        private func smoothedPoint(
+            _ center: SIMD2<Float>,
+            at time: CFTimeInterval,
+            size: CGSize
+        ) -> CGPoint {
+            let smoothedX = smootherX.filter(center.x, at: time)
+            let smoothedY = smootherY.filter(center.y, at: time)
+            return CGPoint(x: CGFloat(smoothedX) * size.width, y: CGFloat(smoothedY) * size.height)
         }
 
         /// Keep a held dot glued to its (currently off-candidate) object by re-projecting the last
@@ -363,6 +493,7 @@
 
         private func hideDot() {
             lastTargetTexCenter = nil
+            lastTargetTrackID = nil
             guard wasShown else {
                 dot.alpha = 0
                 return

@@ -254,6 +254,9 @@ extension PhotoCaptureClient {
         /// Metric depth in metres to the object centre (smaller = nearer). `nil` when depth is
         /// unavailable — the centre-dot overlay then falls back to centre-proximity ranking.
         public let depth: Float?
+        /// Stable per-object tracking ID. The centre-dot overlay ID-locks onto this so it follows
+        /// the same object across frames instead of "nearest box this frame". `nil` when untracked.
+        public let trackID: UUID?
 
         public init(
             x: Float,
@@ -263,7 +266,8 @@ extension PhotoCaptureClient {
             label: String? = nil,
             confidence: Float? = nil,
             color: SIMD4<Float> = SIMD4<Float>(0, 1, 0, 1),
-            depth: Float? = nil
+            depth: Float? = nil,
+            trackID: UUID? = nil
         ) {
             self.x = x
             self.y = y
@@ -273,6 +277,7 @@ extension PhotoCaptureClient {
             self.confidence = confidence
             self.color = color
             self.depth = depth
+            self.trackID = trackID
         }
     }
 }
