@@ -45,24 +45,52 @@ fragment float4 cameraFragment(CameraVertexOut in [[stage_in]],
 
 // MARK: - Bounding Box Overlay Rendering
 
+// `color` (16-byte aligned) is first so the layout has no padding (must match the Swift struct).
 struct BoxVertex {
-    float2 position;
     float4 color;
+    float2 position;   // Clip-space position (-1..1)
+    float2 localPos;   // Pixel position within the box, relative to its center
+    float2 halfSize;   // Box half-extent in pixels
+    float2 params;     // x = corner radius (px), y = border width (px)
 };
 
 struct BoxVertexOut {
     float4 position [[position]];
     float4 color;
+    float2 localPos;
+    float2 halfSize;
+    float2 params;
 };
 
 vertex BoxVertexOut boxVertex(uint vertexID [[vertex_id]],
                               const device BoxVertex* vertices [[buffer(0)]]) {
+    BoxVertex v = vertices[vertexID];
     BoxVertexOut out;
-    out.position = float4(vertices[vertexID].position, 0.0, 1.0);
-    out.color = vertices[vertexID].color;
+    out.position = float4(v.position, 0.0, 1.0);
+    out.color = v.color;
+    out.localPos = v.localPos;
+    out.halfSize = v.halfSize;
+    out.params = v.params;
     return out;
 }
 
+// Signed distance from point `p` to a rounded rectangle centered at the origin.
+// Negative inside, zero on the edge, positive outside.
+float sdRoundBox(float2 p, float2 halfSize, float radius) {
+    float2 q = abs(p) - halfSize + radius;
+    return min(max(q.x, q.y), 0.0) + length(max(q, float2(0.0))) - radius;
+}
+
 fragment float4 boxFragment(BoxVertexOut in [[stage_in]]) {
-    return in.color;
+    float radius = in.params.x;
+    float border = in.params.y;
+    float dist = sdRoundBox(in.localPos, in.halfSize, radius);
+    // Anti-alias over ~1px; the border ring is the band [-border, 0] of the SDF.
+    float aa = max(fwidth(dist), 1e-4);
+    float outer = 1.0 - smoothstep(-aa, aa, dist);
+    float inner = 1.0 - smoothstep(-aa, aa, dist + border);
+    float ring = clamp(outer - inner, 0.0, 1.0);
+    float4 color = in.color;
+    color.a *= ring;
+    return color;
 }
