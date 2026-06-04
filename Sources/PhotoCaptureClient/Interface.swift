@@ -89,4 +89,8 @@ public struct PhotoCaptureClient: Sendable {
     /// Show or hide detection labels (class name + confidence) drawn on the preview.
     /// Labels are derived from each `OverlayRect`'s `label` / `confidence`; boxes are unaffected.
     public var setLabelsVisible: @Sendable (_ visible: Bool) -> Void = { _ in }
+
+    /// Choose how detection overlays are drawn on the live preview (boxes vs. a single
+    /// animated center dot). Overlay data is still supplied via `updateOverlays`.
+    public var setOverlayStyle: @Sendable (_ style: OverlayStyle) -> Void = { _ in }
 }

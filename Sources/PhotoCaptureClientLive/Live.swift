@@ -50,6 +50,9 @@ extension PhotoCaptureClient: DependencyKey {
             },
             setLabelsVisible: { visible in
                 Task { await actor.setLabelsVisible(visible) }
+            },
+            setOverlayStyle: { style in
+                Task { await actor.setOverlayStyle(style) }
             }
         )
     }()

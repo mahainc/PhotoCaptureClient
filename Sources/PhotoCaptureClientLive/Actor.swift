@@ -654,6 +654,10 @@ actor PhotoCaptureClientActor {
         func setLabelsVisible(_ visible: Bool) {
             metalRenderer?.setLabelsVisible(visible)
         }
+
+        func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {
+            metalRenderer?.setOverlayStyle(style)
+        }
     #else
         func getPreviewView() -> PhotoCaptureClient.PreviewView {
             return PhotoCaptureClient.PreviewView(view: NSView())
@@ -662,6 +666,8 @@ actor PhotoCaptureClientActor {
         func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {}
 
         func setLabelsVisible(_ visible: Bool) {}
+
+        func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {}
     #endif
 
     // MARK: - Helpers

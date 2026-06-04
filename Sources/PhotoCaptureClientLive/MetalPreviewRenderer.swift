@@ -51,6 +51,9 @@
         /// Overlay that draws detection labels (class name + confidence) above the Metal preview.
         private let labelOverlayView = DetectionLabelOverlayView()
 
+        /// Overlay that draws a single animated dot (the `.centerDot` style) above the preview.
+        private let dotOverlayView = DetectionDotOverlayView()
+
         // Render pipelines
         private let cameraPipeline: MTLRenderPipelineState
         private let boxPipeline: MTLRenderPipelineState
@@ -79,6 +82,11 @@
 
         /// Current overlay rectangles — written from any thread, read from main thread.
         private let _overlays = OSAllocatedUnfairLock<[PhotoCaptureClient.OverlayRect]>(initialState: [])
+
+        /// How overlays are drawn (boxes vs. center dot). The Metal box pass runs only for `.boxes`.
+        private let _overlayStyle = OSAllocatedUnfairLock<PhotoCaptureClient.OverlayStyle>(
+            initialState: .boxes
+        )
 
         /// Dirty flag — set by enqueueFrame, cleared by draw. Prevents redundant draws.
         private let _needsDraw = OSAllocatedUnfairLock<Bool>(initialState: false)
@@ -213,6 +221,16 @@
                 labelOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
             ])
 
+            // Dot overlay sits above the Metal view, pinned to the same bounds.
+            dotOverlayView.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(dotOverlayView)
+            NSLayoutConstraint.activate([
+                dotOverlayView.topAnchor.constraint(equalTo: topAnchor),
+                dotOverlayView.bottomAnchor.constraint(equalTo: bottomAnchor),
+                dotOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
+                dotOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ])
+
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification,
                 object: nil,
@@ -249,6 +267,7 @@
                 guard let self else { return }
                 self.mtkView.setNeedsDisplay()
                 self.labelOverlayView.update(transform: self.currentOverlayTransform())
+                self.dotOverlayView.update(transform: self.currentOverlayTransform())
             }
         }
 
@@ -301,10 +320,12 @@
         /// Update the bounding box overlays displayed on the preview.
         func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {
             _overlays.withLock { $0 = overlays }
-            // Labels are CoreAnimation layers — reposition on the main thread.
+            // Labels and the dot are CoreAnimation views — reposition on the main thread.
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                self.labelOverlayView.update(overlays: overlays, transform: self.currentOverlayTransform())
+                let transform = self.currentOverlayTransform()
+                self.labelOverlayView.update(overlays: overlays, transform: transform)
+                self.dotOverlayView.update(overlays: overlays, transform: transform)
             }
         }
 
@@ -312,6 +333,17 @@
         func setLabelsVisible(_ visible: Bool) {
             DispatchQueue.main.async { [weak self] in
                 self?.labelOverlayView.labelsVisible = visible
+            }
+        }
+
+        /// Select how overlays are drawn: rounded boxes or a single animated center dot.
+        func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {
+            _overlayStyle.withLock { $0 = style }
+            _needsDraw.withLock { $0 = true }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.dotOverlayView.setActive(style == .centerDot)
+                self.mtkView.setNeedsDisplay()
             }
         }
 
@@ -426,9 +458,10 @@
             encoder.setFragmentTexture(frame.mtlTexture, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
-            // 2. Draw bounding box overlays
+            // 2. Draw bounding box overlays (skipped in `.centerDot` style — the dot is a
+            //    CoreAnimation overlay drawn by `dotOverlayView`, not a Metal primitive).
             let overlays = _overlays.withLock { $0 }
-            if !overlays.isEmpty {
+            if _overlayStyle.withLock({ $0 }) == .boxes, !overlays.isEmpty {
                 drawOverlays(overlays, encoder: encoder)
             }
 
