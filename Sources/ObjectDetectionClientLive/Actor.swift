@@ -20,6 +20,12 @@ actor ObjectDetectionClientActor {
     private var resultContinuations: [UUID: AsyncStream<ObjectDetectionClient.DetectionResult>.Continuation] = [:]
     private var frameProcessingTask: Task<Void, Never>?
 
+    /// Track-by-detection layer: turns identity-less per-frame detections into stable, coasted tracks.
+    /// Created in `startDetection`, reset in `stopDetection`.
+    private var tracker: MultiObjectTracker?
+    /// Timestamp of the previous processed frame, for the tracker's inter-frame `dt`.
+    private var lastFrameTimestamp: Date?
+
     /// Thread-safe mode accessible from any isolation domain.
     private let modeStorage = OSAllocatedUnfairLock(initialState: ObjectDetectionClient.DetectionMode.manual)
 
@@ -138,6 +144,14 @@ actor ObjectDetectionClientActor {
             )
         }
 
+        tracker = MultiObjectTracker(
+            config: TrackerConfiguration(
+                highConfidence: configuration.highConfidenceThreshold,
+                lowConfidence: configuration.confidenceThreshold
+            )
+        )
+        lastFrameTimestamp = nil
+
         modeStorage.withLock { $0 = .auto }
 
         frameProcessingTask = Task { [weak self] in
@@ -158,6 +172,8 @@ actor ObjectDetectionClientActor {
         vnModel = nil
         labels = []
         configuration = nil
+        tracker = nil
+        lastFrameTimestamp = nil
 
         for continuation in resultContinuations.values {
             continuation.finish()
@@ -171,77 +187,110 @@ actor ObjectDetectionClientActor {
         guard let vnModel else { return }
         guard let configuration else { return }
 
-        let result: ObjectDetectionClient.DetectionResult? = await withCheckedContinuation { continuation in
-            inferenceQueue.async { [labels] in
-                let start = CFAbsoluteTimeGetCurrent()
+        let raw: (detections: [TrackerDetection], inferenceMs: Double)? =
+            await withCheckedContinuation { continuation in
+                inferenceQueue.async {
+                    let start = CFAbsoluteTimeGetCurrent()
 
-                #if canImport(UIKit)
-                    let request = VNCoreMLRequest(model: vnModel)
+                    #if canImport(UIKit)
+                        let request = VNCoreMLRequest(model: vnModel)
+                        request.imageCropAndScaleOption = .scaleFill
 
-                    request.imageCropAndScaleOption = .scaleFill
-
-                    // Use CVPixelBuffer directly — avoids CIImage allocation per frame
-                    let handler = VNImageRequestHandler(cvPixelBuffer: wrapper.pixelBuffer, options: [:])
-                    do {
-                        try handler.perform([request])
-                    } catch {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-
-                    let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
-                    var detectedObjects: [ObjectDetectionClient.DetectedObject] = []
-
-                    if let results = request.results as? [VNRecognizedObjectObservation] {
-                        for prediction in results.prefix(configuration.maxDetections) {
-                            let conf = prediction.labels[0].confidence
-                            guard conf >= configuration.confidenceThreshold else { continue }
-
-                            let visionBox = prediction.boundingBox
-                            // Vision uses bottom-left origin → convert to top-left
-                            let boundingBox = ObjectDetectionClient.BoundingBox(
-                                x: Float(visionBox.minX),
-                                y: Float(1 - visionBox.maxY),
-                                width: Float(visionBox.width),
-                                height: Float(visionBox.height)
-                            )
-
-                            // Sample true Z depth at the box centre (nil on non-depth devices/simulator).
-                            let depth = Self.sampleDepth(
-                                in: wrapper.depthBuffer,
-                                centerX: boundingBox.x + boundingBox.width * 0.5,
-                                centerY: boundingBox.y + boundingBox.height * 0.5,
-                                boxWidth: boundingBox.width,
-                                boxHeight: boundingBox.height
-                            )
-
-                            let label = prediction.labels[0].identifier
-                            detectedObjects.append(
-                                ObjectDetectionClient.DetectedObject(
-                                    label: label,
-                                    confidence: conf,
-                                    boundingBox: boundingBox,
-                                    depth: depth
-                                )
-                            )
+                        // Use CVPixelBuffer directly — avoids CIImage allocation per frame.
+                        let handler = VNImageRequestHandler(cvPixelBuffer: wrapper.pixelBuffer, options: [:])
+                        do {
+                            try handler.perform([request])
+                        } catch {
+                            continuation.resume(returning: nil)
+                            return
                         }
-                    }
 
-                    let result = ObjectDetectionClient.DetectionResult(
-                        objects: detectedObjects,
-                        inferenceTimeMs: inferenceTime,
-                        timestamp: wrapper.timestamp
-                    )
-                    continuation.resume(returning: result)
-                #else
-                    continuation.resume(returning: nil)
-                #endif
+                        let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
+                        var detections: [TrackerDetection] = []
+
+                        if let results = request.results as? [VNRecognizedObjectObservation] {
+                            for prediction in results.prefix(configuration.maxDetections) {
+                                let conf = prediction.labels[0].confidence
+                                guard conf >= configuration.confidenceThreshold else { continue }
+
+                                let visionBox = prediction.boundingBox
+                                // Vision uses bottom-left origin → convert to top-left.
+                                let boundingBox = ObjectDetectionClient.BoundingBox(
+                                    x: Float(visionBox.minX),
+                                    y: Float(1 - visionBox.maxY),
+                                    width: Float(visionBox.width),
+                                    height: Float(visionBox.height)
+                                )
+
+                                // Sample true Z depth at the box centre (nil on non-depth devices).
+                                let depth = Self.sampleDepth(
+                                    in: wrapper.depthBuffer,
+                                    centerX: boundingBox.x + boundingBox.width * 0.5,
+                                    centerY: boundingBox.y + boundingBox.height * 0.5,
+                                    boxWidth: boundingBox.width,
+                                    boxHeight: boundingBox.height
+                                )
+
+                                detections.append(
+                                    TrackerDetection(
+                                        box: boundingBox,
+                                        confidence: conf,
+                                        label: prediction.labels[0].identifier,
+                                        depth: depth
+                                    )
+                                )
+                            }
+                        }
+
+                        continuation.resume(returning: (detections, inferenceTime))
+                    #else
+                        continuation.resume(returning: nil)
+                    #endif
+                }
             }
+
+        guard let raw else { return }
+
+        // Tracker step runs in the actor's (single-threaded) isolation: assign stable IDs and coast
+        // confirmed tracks through brief detection dropouts so the dot stops flickering/teleporting.
+        let previousTimestamp = lastFrameTimestamp
+        let dt = previousTimestamp.map { Float(wrapper.timestamp.timeIntervalSince($0)) } ?? 0.333
+        // Never regress the stored timestamp if a frame arrives out of order, so the next dt can't
+        // become a large "catch-up" value (the tracker also clamps dt to [minDt, maxDt]).
+        lastFrameTimestamp = previousTimestamp.map { max($0, wrapper.timestamp) } ?? wrapper.timestamp
+        let tracks = tracker?.update(detections: raw.detections, dt: dt) ?? []
+        let objects = tracks.map { track in
+            ObjectDetectionClient.DetectedObject(
+                id: track.id,
+                label: track.label,
+                confidence: track.confidence,
+                boundingBox: track.box,
+                depth: track.depth
+            )
         }
 
-        if let result {
-            yieldResult(result)
-        }
+        #if DEBUG
+            if !objects.isEmpty {
+                let summary = objects.map { object in
+                    let depthText = object.depth.map { String(format: "%.2fm", $0) } ?? "nil"
+                    return "\(object.label)=\(depthText)"
+                }
+                .joined(separator: " ")
+                let nearest =
+                    objects
+                    .compactMap { object in object.depth.map { (object.label, $0) } }
+                    .min { $0.1 < $1.1 }?.0 ?? "—"
+                print("[DEPTH] \(summary) → nearest \(nearest)")
+            }
+        #endif
+
+        yieldResult(
+            ObjectDetectionClient.DetectionResult(
+                objects: objects,
+                inferenceTimeMs: raw.inferenceMs,
+                timestamp: wrapper.timestamp
+            )
+        )
     }
 
     // MARK: - Depth Sampling
@@ -346,7 +395,9 @@ actor ObjectDetectionClientActor {
             if let results = request.results as? [VNRecognizedObjectObservation] {
                 for prediction in results.prefix(config.maxDetections) {
                     let conf = prediction.labels[0].confidence
-                    guard conf >= config.confidenceThreshold else { continue }
+                    // Single still has no tracker — filter by the high threshold so the picker only
+                    // shows confident objects (the live floor is intentionally low for ByteTrack).
+                    guard conf >= config.highConfidenceThreshold else { continue }
 
                     let visionBox = prediction.boundingBox
                     // Vision uses bottom-left origin → convert to top-left

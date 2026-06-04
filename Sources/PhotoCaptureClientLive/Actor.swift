@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
+import ImageIO
 import PhotoCaptureClient
 import os
 
@@ -43,6 +44,19 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
     /// Whether the active device delivers depth (informational; depth presence is also implied by a
     /// non-nil `latestDepthMap`).
     private(set) var hasDepth: Bool = false
+    /// EXIF orientation applied to the depth map in software so it matches the rotated/mirrored video
+    /// buffer — `.right` (back, 90° CW) or `.rightMirrored` (front). Set during configuration.
+    private let _depthExifOrientation = OSAllocatedUnfairLock<CGImagePropertyOrientation>(
+        initialState: .right
+    )
+    var depthExifOrientation: CGImagePropertyOrientation {
+        get { _depthExifOrientation.withLock { $0 } }
+        set { _depthExifOrientation.withLock { $0 = newValue } }
+    }
+    #if DEBUG
+        /// One-shot guard so the depth map's orientation/dims are logged once per (re)configuration.
+        private var didLogDepth = false
+    #endif
 
     // Thread-safe continuation for frame delivery.
     // Written from actor context (observePixelBuffers), read from videoDataQueue (captureOutput).
@@ -141,10 +155,16 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
     /// swap doesn't reset rotation back to the sensor default.
     private func applyConnectionOrientation(position: PhotoCaptureClient.CameraPosition) {
         let mirror = position == .front
+        // Depth is oriented in SOFTWARE (applyingExifOrientation), not via the connection: depth
+        // connections don't reliably rotate depthDataMap (notably with isFilteringEnabled), so the raw
+        // map stays sensor-native landscape. Keep one source of truth for depth orientation.
+        depthExifOrientation = mirror ? .rightMirrored : .right
+        #if DEBUG
+            didLogDepth = false
+        #endif
         let connections: [AVCaptureConnection?] = [
             videoDataOutput?.connection(with: .video),
             photoOutput?.connection(with: .video),
-            depthDataOutput?.connection(with: .depthData),
         ]
         for case let connection? in connections {
             if connection.isVideoRotationAngleSupported(90) {
@@ -579,11 +599,27 @@ extension PhotoCaptureDelegate: AVCaptureDepthDataOutputDelegate {
         // disparity or 16-bit depth; converting to DepthFloat32 guarantees comparable metres and a
         // fresh, non-pool backing buffer that is safe to retain past this callback (the wrapper's
         // strong CVPixelBuffer reference keeps it alive once attached).
-        let converted =
+        let metric =
             depthData.depthDataType == kCVPixelFormatType_DepthFloat32
             ? depthData
             : depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
-        latestDepthMap = converted.depthDataMap
+        // Orient the depth map to match the rotated/mirrored video buffer in software. Setting
+        // videoRotationAngle on the depth connection does not reliably rotate depthDataMap, so the raw
+        // map is sensor-native landscape; sampling a portrait box centre there reads a 90°-wrong (and,
+        // front, mirrored) pixel. applyingExifOrientation rotates both the map and its calibration so
+        // the existing top-left, portrait-normalised box centre samples the correct pixel.
+        let oriented = metric.applyingExifOrientation(depthExifOrientation)
+        let map = oriented.depthDataMap
+        latestDepthMap = map
+        #if DEBUG
+            if !didLogDepth {
+                didLogDepth = true
+                onLog?(
+                    "Depth map \(CVPixelBufferGetWidth(map))x\(CVPixelBufferGetHeight(map)) "
+                        + "(portrait expects height > width), exif=\(depthExifOrientation.rawValue)"
+                )
+            }
+        #endif
     }
 }
 
