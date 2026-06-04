@@ -6,18 +6,20 @@
 
     // MARK: - Detection Dot Overlay View
 
-    /// Draws a single colored dot at the center of one fully-visible detected object (the largest
-    /// on-screen box — a depth proxy where "bigger = nearer"). Used by the `.centerDot` overlay
-    /// style in place of bounding boxes.
+    /// Draws a single colored dot at the center of the fully-visible detected object that is
+    /// *nearest the camera* — ranked by true Z depth (LiDAR / dual camera) when available, falling
+    /// back to center-proximity (the object you're aiming at) on devices/simulator without depth.
+    /// Used by the `.centerDot` overlay style in place of bounding boxes.
     ///
     /// The detection stream is a sequence of independent, noisy, identity-less snapshots (~3 fps,
-    /// fresh per-frame boxes, no tracking), so a naked per-frame argmax makes the dot flip between
-    /// near-equal objects and abandon the nearest object whenever its box briefly clips a frame
-    /// edge. To stay stable this view tracks its current target across frames (by transform-invariant
-    /// texture-space center) and:
-    ///   - resists switching unless a different object is clearly larger (`switchAreaRatio`),
+    /// fresh per-frame boxes, no tracking), so a naked per-frame argmin makes the dot flip between
+    /// near-equal objects and abandon the target whenever its box briefly clips a frame edge. To stay
+    /// stable this view tracks its current target across frames (by transform-invariant texture-space
+    /// center) and:
+    ///   - resists switching unless a different object is clearly nearer (`switchDepthFraction` /
+    ///     `switchProximityFraction`),
     ///   - holds — and keeps re-projecting — through brief drop-outs of the current target
-    ///     (`holdDuration`), unless a comparably-large object is already on screen.
+    ///     (`holdDuration`), unless a nearer object is already on screen.
     /// New detections glide the dot; transform-only updates (pinch-zoom, layout) snap it so it tracks
     /// the geometry crisply, exactly like the bounding boxes and labels.
     final class DetectionDotOverlayView: UIView {
@@ -30,9 +32,20 @@
         }
 
         private enum Tuning {
-            /// A challenger object must be at least this much larger (by on-screen area) than the
-            /// current target before the dot switches to it. Kills flip-flop between near-equal boxes.
-            static let switchAreaRatio: Float = 1.25
+            /// A challenger must be nearer than the current target by at least this *fraction* of the
+            /// current depth before the dot switches to it (relative, so it scales with range). Kills
+            /// flip-flop between objects at near-equal distance. Tuned high for confident commitment.
+            static let switchDepthFraction: Float = 0.30
+            /// Absolute depth floor (metres) for the switch margin, so very near objects don't chatter
+            /// when the relative margin shrinks to noise.
+            static let switchDepthFloor: Float = 0.03
+            /// In the depth-less fallback, a challenger must be this fraction closer to the frame
+            /// center than the current target before switching. Tuned high for confident commitment.
+            static let switchProximityFraction: Float = 0.30
+            /// Metres added beyond the farthest valid depth in a frame to rank objects whose depth
+            /// couldn't be sampled — they fall behind any object with a real reading, but stay ordered
+            /// among themselves by center-proximity.
+            static let depthlessPenalty: Float = 0.5
             /// Max texture-space distance for a candidate to count as the *same* object as last frame
             /// (≈ one object's per-frame center drift; small enough not to grab a neighbouring object).
             static let sameObjectMaxDistance: Float = 0.08
@@ -51,9 +64,12 @@
         /// center, transform-invariant) and on-screen geometry.
         private struct Candidate {
             let texCenter: SIMD2<Float>
-            let screenArea: Float
             let screenPoint: CGPoint
             let color: SIMD4<Float>
+            /// Metric depth in metres (smaller = nearer); `nil` when depth couldn't be sampled.
+            let depth: Float?
+            /// Normalized screen-space distance from the frame center (0 = centered, ≈0.7 at a corner).
+            let proximity: Float
         }
 
         private enum Decision {
@@ -70,7 +86,10 @@
 
         // Cross-frame tracking state.
         private var lastTargetTexCenter: SIMD2<Float>?
-        private var lastTargetArea: Float = 0
+        /// The tracked target's last sampled depth (metres); `nil` if it had no depth.
+        private var lastTargetDepth: Float?
+        /// The tracked target's last screen-space center-proximity.
+        private var lastTargetProximity: Float = 0
         private var lastSeenTime: CFTimeInterval = 0
 
         private var overlays: [PhotoCaptureClient.OverlayRect] = []
@@ -169,44 +188,94 @@
                 guard screenArea.isFinite, screenArea > 0 else { return nil }
                 let centerX = rect.minX + rect.width * 0.5
                 let centerY = rect.minY + rect.height * 0.5
+                let proximityX = centerX - 0.5
+                let proximityY = centerY - 0.5
                 return Candidate(
                     texCenter: SIMD2<Float>(
                         overlay.x + overlay.width * 0.5,
                         overlay.y + overlay.height * 0.5
                     ),
-                    screenArea: screenArea,
                     screenPoint: CGPoint(
                         x: CGFloat(centerX) * size.width,
                         y: CGFloat(centerY) * size.height
                     ),
-                    color: overlay.color
+                    color: overlay.color,
+                    depth: overlay.depth,
+                    proximity: (proximityX * proximityX + proximityY * proximityY).squareRoot()
                 )
             }
         }
 
-        /// Decide what the dot should do this frame, applying stickiness and the hold grace window.
+        /// Decide what the dot should do this frame, ranking by nearest depth (with center-proximity
+        /// fallback) and applying stickiness + the hold grace window.
         private func decideTarget(
             candidates: [Candidate],
             now: CFTimeInterval
         ) -> Decision {
-            guard let largest = candidates.max(by: { $0.screenArea < $1.screenArea }) else {
+            guard !candidates.isEmpty else {
                 // Nothing fully visible — hold briefly so a one-frame dropout doesn't blink the dot.
                 return withinHold(now) ? .hold : .hide
             }
+
+            // Primary ranking scalar: metric depth when available; otherwise a penalty placed just
+            // beyond the farthest real reading so depth-less candidates rank behind any real one but
+            // stay ordered among themselves by center-proximity. With no depth at all every primary
+            // collapses to 0 and proximity decides — one continuous key, no per-frame metric flip.
+            let penaltyBase = candidates.compactMap(\.depth).max()
+            func primary(_ candidate: Candidate) -> Float {
+                if let depth = candidate.depth { return depth }
+                if let base = penaltyBase { return base + Tuning.depthlessPenalty }
+                return 0
+            }
+            func isBetter(
+                _ lhs: Candidate,
+                _ rhs: Candidate
+            ) -> Bool {
+                let leftPrimary = primary(lhs)
+                let rightPrimary = primary(rhs)
+                if leftPrimary != rightPrimary { return leftPrimary < rightPrimary }
+                return lhs.proximity < rhs.proximity
+            }
+            // Whether `challenger` is *clearly* nearer than `incumbent` — by depth (relative margin
+            // with an absolute floor) or, when depths are ~equal, by center-proximity.
+            func isClearlyNearer(
+                _ challenger: Candidate,
+                than incumbent: Candidate
+            ) -> Bool {
+                let gap = primary(incumbent) - primary(challenger)
+                let threshold = max(
+                    Tuning.switchDepthFloor,
+                    primary(incumbent) * Tuning.switchDepthFraction
+                )
+                if gap >= threshold { return true }
+                if abs(gap) <= threshold {
+                    return challenger.proximity <= incumbent.proximity * (1 - Tuning.switchProximityFraction)
+                }
+                return false
+            }
+
+            guard let best = candidates.min(by: isBetter) else {
+                return withinHold(now) ? .hold : .hide
+            }
+
             guard let current = continuation(in: candidates) else {
-                // Tracked object absent this frame. Only hold if it's worth waiting for — i.e. the
-                // best available alternative is smaller than what we were tracking; otherwise take it.
-                if withinHold(now), largest.screenArea < lastTargetArea {
+                // Tracked object absent this frame. Hold only if it's worth waiting for — i.e. the
+                // best available alternative is farther/worse than what we were tracking.
+                let lastPrimary =
+                    lastTargetDepth ?? (penaltyBase.map { $0 + Tuning.depthlessPenalty } ?? 0)
+                let bestPrimary = primary(best)
+                let trackedWasNearer =
+                    bestPrimary > lastPrimary
+                    || (bestPrimary == lastPrimary && best.proximity > lastTargetProximity)
+                if withinHold(now), trackedWasNearer {
                     return .hold
                 }
-                return .show(largest, isSwitch: true)
+                return .show(best, isSwitch: true)
             }
-            // Keep the current object unless a different one is clearly larger (nearer).
-            let isClearlyLarger =
-                largest.texCenter != current.texCenter
-                && largest.screenArea >= current.screenArea * Tuning.switchAreaRatio
-            if isClearlyLarger {
-                return .show(largest, isSwitch: true)
+
+            // Keep the current object unless a different one is clearly nearer.
+            if best.texCenter != current.texCenter, isClearlyNearer(best, than: current) {
+                return .show(best, isSwitch: true)
             }
             return .show(current, isSwitch: false)
         }
@@ -262,7 +331,8 @@
             }
 
             lastTargetTexCenter = candidate.texCenter
-            lastTargetArea = candidate.screenArea
+            lastTargetDepth = candidate.depth
+            lastTargetProximity = candidate.proximity
             if cause == .detections {
                 lastSeenTime = now
             }

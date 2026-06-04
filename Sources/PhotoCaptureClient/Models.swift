@@ -213,6 +213,10 @@ extension PhotoCaptureClient {
         public let width: Int
         public let height: Int
         public let bytesPerRow: Int
+        /// Latest depth map (`kCVPixelFormatType_DepthFloat32`, metric metres, smaller = nearer),
+        /// oriented to match `pixelBuffer`. `nil` on devices/sessions without depth. Retained so the
+        /// consumer can sample per-object depth on its own queue.
+        public let depthBuffer: CVPixelBuffer?
         public let timestamp: Date
 
         public init(
@@ -220,12 +224,14 @@ extension PhotoCaptureClient {
             width: Int,
             height: Int,
             bytesPerRow: Int,
+            depthBuffer: CVPixelBuffer? = nil,
             timestamp: Date = .now
         ) {
             self.pixelBuffer = pixelBuffer
             self.width = width
             self.height = height
             self.bytesPerRow = bytesPerRow
+            self.depthBuffer = depthBuffer
             self.timestamp = timestamp
         }
     }
@@ -245,6 +251,9 @@ extension PhotoCaptureClient {
         public let label: String?
         public let confidence: Float?
         public let color: SIMD4<Float>
+        /// Metric depth in metres to the object centre (smaller = nearer). `nil` when depth is
+        /// unavailable — the centre-dot overlay then falls back to centre-proximity ranking.
+        public let depth: Float?
 
         public init(
             x: Float,
@@ -253,7 +262,8 @@ extension PhotoCaptureClient {
             height: Float,
             label: String? = nil,
             confidence: Float? = nil,
-            color: SIMD4<Float> = SIMD4<Float>(0, 1, 0, 1)
+            color: SIMD4<Float> = SIMD4<Float>(0, 1, 0, 1),
+            depth: Float? = nil
         ) {
             self.x = x
             self.y = y
@@ -262,6 +272,7 @@ extension PhotoCaptureClient {
             self.label = label
             self.confidence = confidence
             self.color = color
+            self.depth = depth
         }
     }
 }

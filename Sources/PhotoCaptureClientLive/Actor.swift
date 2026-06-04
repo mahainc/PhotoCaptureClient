@@ -29,6 +29,21 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
     private(set) var videoDataOutput: AVCaptureVideoDataOutput?
     private let videoDataQueue = DispatchQueue(label: "PhotoCaptureDelegate.videoDataQueue")
 
+    // Depth delivery properties (depth-capable devices only).
+    private(set) var depthDataOutput: AVCaptureDepthDataOutput?
+    private let depthDataQueue = DispatchQueue(label: "PhotoCaptureDelegate.depthDataQueue")
+    /// Latest converted depth map (DepthFloat32, metric metres), oriented to match the video buffer.
+    /// Written on depthDataQueue, read on videoDataQueue when building a throttled wrapper.
+    private struct DepthMapState: @unchecked Sendable { var buffer: CVPixelBuffer? }
+    private let _latestDepthMap = OSAllocatedUnfairLock<DepthMapState>(initialState: DepthMapState(buffer: nil))
+    var latestDepthMap: CVPixelBuffer? {
+        get { _latestDepthMap.withLockUnchecked { $0.buffer } }
+        set { _latestDepthMap.withLockUnchecked { $0.buffer = newValue } }
+    }
+    /// Whether the active device delivers depth (informational; depth presence is also implied by a
+    /// non-nil `latestDepthMap`).
+    private(set) var hasDepth: Bool = false
+
     // Thread-safe continuation for frame delivery.
     // Written from actor context (observePixelBuffers), read from videoDataQueue (captureOutput).
     private let _pixelBufferContinuation = OSAllocatedUnfairLock<
@@ -66,15 +81,10 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         session.beginConfiguration()
         session.sessionPreset = .photo
 
-        // Find camera device
+        // Find camera device — prefer a depth-capable device for the position so the centre-dot
+        // overlay can rank objects by true Z distance; falls back to the wide-angle camera.
         let avPosition: AVCaptureDevice.Position = position == .front ? .front : .back
-        guard
-            let device = AVCaptureDevice.default(
-                .builtInWideAngleCamera,
-                for: .video,
-                position: avPosition
-            )
-        else {
+        guard let device = Self.bestDevice(position: avPosition) else {
             session.commitConfiguration()
             throw PhotoCaptureClient.Error.captureDeviceNotFound(position)
         }
@@ -107,13 +117,10 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
             self.videoDataOutput = videoOutput
         }
 
-        // Cap camera frame delivery to 30fps to reduce CPU load.
-        // The Metal renderer draws on-demand per frame, so 30fps is sufficient for preview.
-        if let _ = try? device.lockForConfiguration() {
-            device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
-            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
-            device.unlockForConfiguration()
-        }
+        // Add the depth output + select a depth-capable format when available; otherwise just cap the
+        // frame rate. Must run before commitConfiguration so the depth connection is wired.
+        configureDepth(session: session, device: device)
+        onLog?("Depth delivery available: \(hasDepth)")
 
         session.commitConfiguration()
 
@@ -137,6 +144,7 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         let connections: [AVCaptureConnection?] = [
             videoDataOutput?.connection(with: .video),
             photoOutput?.connection(with: .video),
+            depthDataOutput?.connection(with: .depthData),
         ]
         for case let connection? in connections {
             if connection.isVideoRotationAngleSupported(90) {
@@ -147,6 +155,120 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
                 connection.isVideoMirrored = mirror
             }
         }
+    }
+
+    // MARK: - Device & Depth Selection
+
+    /// Discover the best capture device for a position, preferring depth-capable virtual devices
+    /// (LiDAR / dual / TrueDepth) over the plain wide-angle camera.
+    private static func bestDevice(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        #if os(iOS)
+            let preferred: [AVCaptureDevice.DeviceType] =
+                position == .front
+                ? [.builtInTrueDepthCamera, .builtInWideAngleCamera]
+                : [
+                    .builtInLiDARDepthCamera,
+                    .builtInDualWideCamera,
+                    .builtInDualCamera,
+                    .builtInWideAngleCamera,
+                ]
+        #else
+            let preferred: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+        #endif
+        let discovery = AVCaptureDevice.DiscoverySession(
+            deviceTypes: preferred,
+            mediaType: .video,
+            position: position
+        )
+        for type in preferred {
+            if let match = discovery.devices.first(where: { $0.deviceType == type }) {
+                return match
+            }
+        }
+        return discovery.devices.first
+            ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+    }
+
+    /// Pick the highest-resolution device format that supports depth, paired with a depth format
+    /// (preferring 16-bit). Returns `nil` when the device delivers no depth.
+    private static func depthCapableFormat(
+        for device: AVCaptureDevice
+    ) -> (format: AVCaptureDevice.Format, depthFormat: AVCaptureDevice.Format)? {
+        var best: (AVCaptureDevice.Format, AVCaptureDevice.Format)?
+        var bestPixels = 0
+        for format in device.formats where !format.supportedDepthDataFormats.isEmpty {
+            let depthFormats = format.supportedDepthDataFormats
+            let preferredDepth =
+                depthFormats.first {
+                    CMFormatDescriptionGetMediaSubType($0.formatDescription)
+                        == kCVPixelFormatType_DepthFloat16
+                } ?? depthFormats.first
+            guard let depthFormat = preferredDepth else { continue }
+            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            let pixels = Int(dimensions.width) * Int(dimensions.height)
+            if pixels > bestPixels {
+                bestPixels = pixels
+                best = (format, depthFormat)
+            }
+        }
+        return best
+    }
+
+    /// Add/refresh the depth output for `device` — or tear it down and just cap the frame rate when
+    /// the device has no depth. Must run inside a `beginConfiguration`/`commitConfiguration` block.
+    private func configureDepth(
+        session: AVCaptureSession,
+        device: AVCaptureDevice
+    ) {
+        guard let depthInfo = Self.depthCapableFormat(for: device) else {
+            // No depth on this device — remove any prior depth output and just cap the frame rate.
+            if let existing = depthDataOutput {
+                session.removeOutput(existing)
+                depthDataOutput = nil
+            }
+            hasDepth = false
+            if (try? device.lockForConfiguration()) != nil {
+                applyClampedFrameRate(device, target: 30)
+                device.unlockForConfiguration()
+            }
+            return
+        }
+
+        // Select the depth-capable format first so the device can vend depth (this implicitly
+        // switches the session to input-priority), then clamp the frame rate — all in one lock.
+        if (try? device.lockForConfiguration()) != nil {
+            device.activeFormat = depthInfo.format
+            device.activeDepthDataFormat = depthInfo.depthFormat
+            applyClampedFrameRate(device, target: 30)
+            device.unlockForConfiguration()
+        }
+
+        // Wire the depth output now that the active format supports depth.
+        if depthDataOutput == nil {
+            let output = AVCaptureDepthDataOutput()
+            guard session.canAddOutput(output) else {
+                hasDepth = false
+                return
+            }
+            session.addOutput(output)
+            output.isFilteringEnabled = true
+            output.setDelegate(self, callbackQueue: depthDataQueue)
+            depthDataOutput = output
+        }
+        hasDepth = true
+    }
+
+    /// Clamp a target FPS to the active format's supported range and pin min == max. Caller must
+    /// already hold `lockForConfiguration`.
+    private func applyClampedFrameRate(
+        _ device: AVCaptureDevice,
+        target: Double
+    ) {
+        guard let range = device.activeFormat.videoSupportedFrameRateRanges.first else { return }
+        let fps = min(max(target, range.minFrameRate), range.maxFrameRate)
+        let duration = CMTime(value: 1, timescale: CMTimeScale(fps.rounded()))
+        device.activeVideoMinFrameDuration = duration
+        device.activeVideoMaxFrameDuration = duration
     }
 
     func startRunning() {
@@ -167,13 +289,7 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         }
 
         let avPosition: AVCaptureDevice.Position = position == .front ? .front : .back
-        guard
-            let newDevice = AVCaptureDevice.default(
-                .builtInWideAngleCamera,
-                for: .video,
-                position: avPosition
-            )
-        else {
+        guard let newDevice = Self.bestDevice(position: avPosition) else {
             throw PhotoCaptureClient.Error.captureDeviceNotFound(position)
         }
 
@@ -191,6 +307,12 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
             throw PhotoCaptureClient.Error.cannotAddInput
         }
         session.addInput(newInput)
+
+        // Stale depth from the previous device must not be sampled against the new device's frames.
+        latestDepthMap = nil
+        // Re-establish (or tear down) depth for the new device while still inside the configuration.
+        configureDepth(session: session, device: newDevice)
+
         session.commitConfiguration()
 
         self.currentDevice = newDevice
@@ -249,6 +371,9 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         pixelBufferContinuation?.finish()
         pixelBufferContinuation = nil
         videoDataOutput = nil
+        depthDataOutput = nil
+        latestDepthMap = nil
+        hasDepth = false
         onFrame = nil
         captureSession = nil
         photoOutput = nil
@@ -308,6 +433,8 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
 
     #if os(iOS)
         @objc private func sessionWasInterrupted(_ notification: Notification) {
+            // Don't sample a frozen depth map while interrupted; it resumes when depth frames flow.
+            latestDepthMap = nil
             let reason: PhotoCaptureClient.InterruptionReason
             if let userInfo = notification.userInfo,
                 let rawReason = userInfo[AVCaptureSessionInterruptionReasonKey] as? Int,
@@ -326,6 +453,8 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
     #endif
 
     @objc private func sessionRuntimeError(_ notification: Notification) {
+        // A runtime error can drop depth delivery; clear the stale map so ranking falls back cleanly.
+        latestDepthMap = nil
         let message: String
         if let error = notification.userInfo?[AVCaptureSessionErrorKey] as? AVError {
             message = error.localizedDescription
@@ -429,10 +558,32 @@ extension PhotoCaptureDelegate: AVCaptureVideoDataOutputSampleBufferDelegate {
             width: width,
             height: height,
             bytesPerRow: bytesPerRow,
+            depthBuffer: latestDepthMap,
             timestamp: .now
         )
 
         pixelBufferContinuation?.yield(wrapper)
+    }
+}
+
+// MARK: - AVCaptureDepthDataOutputDelegate
+
+extension PhotoCaptureDelegate: AVCaptureDepthDataOutputDelegate {
+    func depthDataOutput(
+        _ output: AVCaptureDepthDataOutput,
+        didOutput depthData: AVDepthData,
+        timestamp: CMTime,
+        connection: AVCaptureConnection
+    ) {
+        // Normalise to metric depth (metres, smaller = nearer). LiDAR/dual cameras may deliver
+        // disparity or 16-bit depth; converting to DepthFloat32 guarantees comparable metres and a
+        // fresh, non-pool backing buffer that is safe to retain past this callback (the wrapper's
+        // strong CVPixelBuffer reference keeps it alive once attached).
+        let converted =
+            depthData.depthDataType == kCVPixelFormatType_DepthFloat32
+            ? depthData
+            : depthData.converting(toDepthDataType: kCVPixelFormatType_DepthFloat32)
+        latestDepthMap = converted.depthDataMap
     }
 }
 
