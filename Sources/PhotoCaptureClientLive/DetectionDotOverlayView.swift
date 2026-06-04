@@ -1,15 +1,25 @@
 #if os(iOS)
     import PhotoCaptureClient
+    import QuartzCore
     import UIKit
     import simd
 
     // MARK: - Detection Dot Overlay View
 
-    /// Draws a single colored dot at the center of the fully-visible detected object nearest the
-    /// screen center. Used by the `.centerDot` overlay style in place of bounding boxes. The dot
-    /// animates ("glides") from one object's center to another as the camera is reframed, and
-    /// fades in/out as a target appears/disappears. Kept in sync with the same aspect-fill + zoom
-    /// transform the boxes use, so it tracks pinch-zoom too.
+    /// Draws a single colored dot at the center of one fully-visible detected object (the largest
+    /// on-screen box — a depth proxy where "bigger = nearer"). Used by the `.centerDot` overlay
+    /// style in place of bounding boxes.
+    ///
+    /// The detection stream is a sequence of independent, noisy, identity-less snapshots (~3 fps,
+    /// fresh per-frame boxes, no tracking), so a naked per-frame argmax makes the dot flip between
+    /// near-equal objects and abandon the nearest object whenever its box briefly clips a frame
+    /// edge. To stay stable this view tracks its current target across frames (by transform-invariant
+    /// texture-space center) and:
+    ///   - resists switching unless a different object is clearly larger (`switchAreaRatio`),
+    ///   - holds through brief drop-outs of the current target (`holdDuration`),
+    ///   - smooths the dot position while tracking one object (`positionSmoothing`).
+    /// It still fades in/out as a target appears/disappears and glides between objects, and stays in
+    /// sync with the aspect-fill + zoom transform the boxes use.
     final class DetectionDotOverlayView: UIView {
 
         private enum Style {
@@ -19,11 +29,44 @@
             static let fadeDuration: TimeInterval = 0.2
         }
 
+        private enum Tuning {
+            /// A challenger object must be at least this much larger (by on-screen area) than the
+            /// current target before the dot switches to it. Kills flip-flop between near-equal boxes.
+            static let switchAreaRatio: Float = 1.25
+            /// Max texture-space distance for a candidate to count as the *same* object as last frame.
+            static let sameObjectMaxDistance: Float = 0.18
+            /// How long to keep the dot on its last target after it drops out of the candidate set
+            /// (bridges brief edge-clips / confidence dips of the nearest object).
+            static let holdDuration: CFTimeInterval = 0.5
+            /// EMA factor applied to the dot position while tracking one object (damps box jitter).
+            static let positionSmoothing: CGFloat = 0.5
+        }
+
+        /// A fully-visible detection considered for the dot, with both an identity key (texture-space
+        /// center, transform-invariant) and on-screen geometry.
+        private struct Candidate {
+            let texCenter: SIMD2<Float>
+            let screenArea: Float
+            let screenPoint: CGPoint
+            let color: SIMD4<Float>
+        }
+
+        private enum Decision {
+            case show(Candidate, isSwitch: Bool)
+            case hold
+            case hide
+        }
+
         /// Whether the dot is drawn at all. Toggled by `PhotoCaptureClient.setOverlayStyle`
         /// (`true` only for `.centerDot`).
         private var isActive: Bool = false
         /// Whether the dot is currently shown (used to decide fade-in vs. glide).
         private var wasShown: Bool = false
+
+        // Cross-frame tracking state.
+        private var lastTargetTexCenter: SIMD2<Float>?
+        private var lastDrawnPoint: CGPoint?
+        private var lastSeenTime: CFTimeInterval = 0
 
         private var overlays: [PhotoCaptureClient.OverlayRect] = []
         private var overlayTransform = OverlayTransform()
@@ -88,12 +131,23 @@
                 return
             }
 
-            // Pick the fully-visible detection with the largest on-screen box area — a depth
-            // proxy where "bigger box = nearer object".
-            var bestPoint: CGPoint?
-            var bestColor: SIMD4<Float> = SIMD4<Float>(0, 1, 0, 1)
-            var bestArea: Float = 0
-            for overlay in overlays {
+            let candidates = makeCandidates(size: size)
+            let now = CACurrentMediaTime()
+
+            switch decideTarget(candidates: candidates, now: now) {
+                case .show(let candidate, let isSwitch):
+                    apply(candidate, isSwitch: isSwitch, animated: animated, now: now)
+                case .hold:
+                    break  // Keep the dot where it is, still visible, until the grace window expires.
+                case .hide:
+                    hideDot()
+            }
+        }
+
+        /// Map every fully-visible overlay to a `Candidate`. Skips boxes that aren't fully inside the
+        /// visible preview (same strict gate the bounding boxes use).
+        private func makeCandidates(size: CGSize) -> [Candidate] {
+            overlays.compactMap { overlay in
                 guard
                     let rect = visibleScreenRect(
                         minX: overlay.x,
@@ -103,27 +157,82 @@
                         transform: overlayTransform
                     )
                 else {
-                    continue
+                    return nil
                 }
-                let area = rect.width * rect.height
-                if area > bestArea {
-                    bestArea = area
-                    bestColor = overlay.color
-                    let centerX = rect.minX + rect.width * 0.5
-                    let centerY = rect.minY + rect.height * 0.5
-                    bestPoint = CGPoint(
+                let centerX = rect.minX + rect.width * 0.5
+                let centerY = rect.minY + rect.height * 0.5
+                return Candidate(
+                    texCenter: SIMD2<Float>(
+                        overlay.x + overlay.width * 0.5,
+                        overlay.y + overlay.height * 0.5
+                    ),
+                    screenArea: rect.width * rect.height,
+                    screenPoint: CGPoint(
                         x: CGFloat(centerX) * size.width,
                         y: CGFloat(centerY) * size.height
-                    )
+                    ),
+                    color: overlay.color
+                )
+            }
+        }
+
+        /// Decide what the dot should do this frame, applying stickiness and the hold grace window.
+        private func decideTarget(
+            candidates: [Candidate],
+            now: CFTimeInterval
+        ) -> Decision {
+            guard let largest = candidates.max(by: { $0.screenArea < $1.screenArea }) else {
+                // Nothing fully visible — hold briefly so a one-frame dropout doesn't blink the dot.
+                return withinHold(now) ? .hold : .hide
+            }
+            guard let current = continuation(in: candidates) else {
+                // The tracked object isn't in this frame's candidates.
+                if withinHold(now) {
+                    return .hold  // Bridge a brief edge-clip / confidence dip of the nearest object.
+                }
+                return .show(largest, isSwitch: true)
+            }
+            // Keep the current object unless a different one is clearly larger (nearer).
+            let isClearlyLarger =
+                largest.texCenter != current.texCenter
+                && largest.screenArea >= current.screenArea * Tuning.switchAreaRatio
+            if isClearlyLarger {
+                return .show(largest, isSwitch: true)
+            }
+            return .show(current, isSwitch: false)
+        }
+
+        private func withinHold(_ now: CFTimeInterval) -> Bool {
+            wasShown && now - lastSeenTime < Tuning.holdDuration
+        }
+
+        /// The candidate that is the continuation of the current target — the nearest one (by
+        /// texture-space center) to last frame's target, within `sameObjectMaxDistance`.
+        private func continuation(in candidates: [Candidate]) -> Candidate? {
+            guard let last = lastTargetTexCenter else { return nil }
+            var best: Candidate?
+            var bestDistance = Tuning.sameObjectMaxDistance * Tuning.sameObjectMaxDistance
+            for candidate in candidates {
+                let deltaX = candidate.texCenter.x - last.x
+                let deltaY = candidate.texCenter.y - last.y
+                let distance = deltaX * deltaX + deltaY * deltaY
+                if distance < bestDistance {
+                    bestDistance = distance
+                    best = candidate
                 }
             }
+            return best
+        }
 
-            guard let point = bestPoint else {
-                hideDot()
-                return
-            }
+        private func apply(
+            _ candidate: Candidate,
+            isSwitch: Bool,
+            animated: Bool,
+            now: CFTimeInterval
+        ) {
+            dot.backgroundColor = color(from: candidate.color)
 
-            dot.backgroundColor = color(from: bestColor)
+            let point = smoothedPoint(for: candidate, isSwitch: isSwitch)
 
             if !wasShown {
                 // Appearing: place at the target and fade in (no slide from a stale position).
@@ -131,7 +240,6 @@
                 wasShown = true
                 UIView.animate(withDuration: Style.fadeDuration) { self.dot.alpha = 1 }
             } else if animated {
-                // Glide from the previous center to the new one.
                 UIView.animate(
                     withDuration: Style.moveDuration,
                     delay: 0,
@@ -142,9 +250,30 @@
             } else {
                 dot.center = point
             }
+
+            lastTargetTexCenter = candidate.texCenter
+            lastDrawnPoint = point
+            lastSeenTime = now
+        }
+
+        /// While tracking the same object, ease the point toward the new center to damp box jitter;
+        /// on a switch or first appearance, go straight to the target.
+        private func smoothedPoint(
+            for candidate: Candidate,
+            isSwitch: Bool
+        ) -> CGPoint {
+            guard !isSwitch, wasShown, let last = lastDrawnPoint else {
+                return candidate.screenPoint
+            }
+            let smoothing = Tuning.positionSmoothing
+            return CGPoint(
+                x: last.x + (candidate.screenPoint.x - last.x) * smoothing,
+                y: last.y + (candidate.screenPoint.y - last.y) * smoothing
+            )
         }
 
         private func hideDot() {
+            lastTargetTexCenter = nil
             guard wasShown else {
                 dot.alpha = 0
                 return
