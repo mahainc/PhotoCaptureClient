@@ -11,6 +11,7 @@ let package = Package(
         .singleTargetLibrary("PhotoCaptureClientLive"),
         .singleTargetLibrary("ObjectDetectionClient"),
         .singleTargetLibrary("ObjectDetectionClientLive"),
+        .singleTargetLibrary("ObjectTracking"),
         .singleTargetLibrary("MultiCamClient"),
         .singleTargetLibrary("MultiCamClientLive"),
     ],
@@ -52,11 +53,15 @@ let package = Package(
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 "ObjectDetectionClient",
+                "ObjectTracking",
                 "PhotoCaptureClient",
             ],
             resources: [
                 .copy("Resources/yolo11n.mlpackage")
             ]
+        ),
+        .target(
+            name: "ObjectTracking"
         ),
         .target(
             name: "MultiCamClient",
@@ -96,6 +101,12 @@ let package = Package(
             name: "ObjectDetectionClientTests",
             dependencies: [
                 "ObjectDetectionClient"
+            ]
+        ),
+        .testTarget(
+            name: "ObjectTrackingTests",
+            dependencies: [
+                "ObjectTracking"
             ]
         ),
     ]

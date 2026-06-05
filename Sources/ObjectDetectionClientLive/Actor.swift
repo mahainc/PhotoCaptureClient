@@ -2,6 +2,7 @@ import CoreML
 import CoreVideo
 import Foundation
 import ObjectDetectionClient
+import ObjectTracking
 import PhotoCaptureClient
 import Vision
 import os
@@ -25,6 +26,10 @@ actor ObjectDetectionClientActor {
     private var tracker: MultiObjectTracker?
     /// Timestamp of the previous processed frame, for the tracker's inter-frame `dt`.
     private var lastFrameTimestamp: Date?
+    /// Estimates global camera motion between frames for BoT-SORT CMC. Created in `startDetection`.
+    private var motionEstimator: CameraMotionEstimator?
+    /// Previous processed frame, registered against the current one to estimate camera motion.
+    private var previousFrameWrapper: PhotoCaptureClient.PixelBufferWrapper?
 
     /// Thread-safe mode accessible from any isolation domain.
     private let modeStorage = OSAllocatedUnfairLock(initialState: ObjectDetectionClient.DetectionMode.manual)
@@ -144,13 +149,14 @@ actor ObjectDetectionClientActor {
             )
         }
 
-        tracker = MultiObjectTracker(
-            config: TrackerConfiguration(
-                highConfidence: configuration.highConfidenceThreshold,
-                lowConfidence: configuration.confidenceThreshold
-            )
+        let trackerConfig = TrackerConfiguration(
+            highConfidence: configuration.highConfidenceThreshold,
+            lowConfidence: configuration.confidenceThreshold
         )
+        tracker = MultiObjectTracker(config: trackerConfig)
+        motionEstimator = CameraMotionEstimator(mode: trackerConfig.cameraMotion)
         lastFrameTimestamp = nil
+        previousFrameWrapper = nil
 
         modeStorage.withLock { $0 = .auto }
 
@@ -173,7 +179,9 @@ actor ObjectDetectionClientActor {
         labels = []
         configuration = nil
         tracker = nil
+        motionEstimator = nil
         lastFrameTimestamp = nil
+        previousFrameWrapper = nil
 
         for continuation in resultContinuations.values {
             continuation.finish()
@@ -186,69 +194,15 @@ actor ObjectDetectionClientActor {
     private func processFrame(_ wrapper: PhotoCaptureClient.PixelBufferWrapper) async {
         guard let vnModel else { return }
         guard let configuration else { return }
+        guard let motionEstimator else { return }
 
-        let raw: (detections: [TrackerDetection], inferenceMs: Double)? =
-            await withCheckedContinuation { continuation in
-                inferenceQueue.async {
-                    let start = CFAbsoluteTimeGetCurrent()
-
-                    #if canImport(UIKit)
-                        let request = VNCoreMLRequest(model: vnModel)
-                        request.imageCropAndScaleOption = .scaleFill
-
-                        // Use CVPixelBuffer directly — avoids CIImage allocation per frame.
-                        let handler = VNImageRequestHandler(cvPixelBuffer: wrapper.pixelBuffer, options: [:])
-                        do {
-                            try handler.perform([request])
-                        } catch {
-                            continuation.resume(returning: nil)
-                            return
-                        }
-
-                        let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
-                        var detections: [TrackerDetection] = []
-
-                        if let results = request.results as? [VNRecognizedObjectObservation] {
-                            for prediction in results.prefix(configuration.maxDetections) {
-                                let conf = prediction.labels[0].confidence
-                                guard conf >= configuration.confidenceThreshold else { continue }
-
-                                let visionBox = prediction.boundingBox
-                                // Vision uses bottom-left origin → convert to top-left.
-                                let boundingBox = ObjectDetectionClient.BoundingBox(
-                                    x: Float(visionBox.minX),
-                                    y: Float(1 - visionBox.maxY),
-                                    width: Float(visionBox.width),
-                                    height: Float(visionBox.height)
-                                )
-
-                                // Sample true Z depth at the box centre (nil on non-depth devices).
-                                let depth = Self.sampleDepth(
-                                    in: wrapper.depthBuffer,
-                                    centerX: boundingBox.x + boundingBox.width * 0.5,
-                                    centerY: boundingBox.y + boundingBox.height * 0.5,
-                                    boxWidth: boundingBox.width,
-                                    boxHeight: boundingBox.height
-                                )
-
-                                detections.append(
-                                    TrackerDetection(
-                                        box: boundingBox,
-                                        confidence: conf,
-                                        label: prediction.labels[0].identifier,
-                                        depth: depth
-                                    )
-                                )
-                            }
-                        }
-
-                        continuation.resume(returning: (detections, inferenceTime))
-                    #else
-                        continuation.resume(returning: nil)
-                    #endif
-                }
-            }
-
+        let raw = await runInference(
+            wrapper: wrapper,
+            previousWrapper: previousFrameWrapper,
+            vnModel: vnModel,
+            configuration: configuration,
+            motionEstimator: motionEstimator
+        )
         guard let raw else { return }
 
         // Tracker step runs in the actor's (single-threaded) isolation: assign stable IDs and coast
@@ -258,13 +212,19 @@ actor ObjectDetectionClientActor {
         // Never regress the stored timestamp if a frame arrives out of order, so the next dt can't
         // become a large "catch-up" value (the tracker also clamps dt to [minDt, maxDt]).
         lastFrameTimestamp = previousTimestamp.map { max($0, wrapper.timestamp) } ?? wrapper.timestamp
-        let tracks = tracker?.update(detections: raw.detections, dt: dt) ?? []
+        previousFrameWrapper = wrapper
+        let tracks = tracker?.update(detections: raw.detections, dt: dt, cameraMotion: raw.cameraMotion) ?? []
         let objects = tracks.map { track in
             ObjectDetectionClient.DetectedObject(
                 id: track.id,
                 label: track.label,
                 confidence: track.confidence,
-                boundingBox: track.box,
+                boundingBox: ObjectDetectionClient.BoundingBox(
+                    x: track.box.x,
+                    y: track.box.y,
+                    width: track.box.width,
+                    height: track.box.height
+                ),
                 depth: track.depth
             )
         }
@@ -293,56 +253,85 @@ actor ObjectDetectionClientActor {
         )
     }
 
-    // MARK: - Depth Sampling
+    /// Run YOLO inference for one frame off the actor (on `inferenceQueue`), sampling per-box depth and
+    /// estimating camera motion versus the previous frame. Returns `nil` on non-iOS or a Vision failure.
+    private func runInference(
+        wrapper: PhotoCaptureClient.PixelBufferWrapper,
+        previousWrapper: PhotoCaptureClient.PixelBufferWrapper?,
+        vnModel: VNCoreMLModel,
+        configuration: ObjectDetectionClient.Configuration,
+        motionEstimator: CameraMotionEstimator
+    ) async -> (detections: [Detection], inferenceMs: Double, cameraMotion: CameraMotion)? {
+        await withCheckedContinuation { continuation in
+            inferenceQueue.async {
+                let start = CFAbsoluteTimeGetCurrent()
 
-    /// Sample metric depth (metres) at a detection's centre from the depth map attached to the frame.
-    /// Returns the ~20th percentile of valid samples over the inner ~60% of the box (robust to
-    /// see-through background / partial occlusion), or `nil` when no depth is available.
-    private static func sampleDepth(
-        in depthBuffer: CVPixelBuffer?,
-        centerX: Float,
-        centerY: Float,
-        boxWidth: Float,
-        boxHeight: Float
-    ) -> Float? {
-        guard let depthBuffer else { return nil }
-        let width = CVPixelBufferGetWidth(depthBuffer)
-        let height = CVPixelBufferGetHeight(depthBuffer)
-        guard width > 0, height > 0 else { return nil }
+                #if canImport(UIKit)
+                    let request = VNCoreMLRequest(model: vnModel)
+                    request.imageCropAndScaleOption = .scaleFill
 
-        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
-        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthBuffer)
+                    // Use CVPixelBuffer directly — avoids CIImage allocation per frame.
+                    let handler = VNImageRequestHandler(cvPixelBuffer: wrapper.pixelBuffer, options: [:])
+                    do {
+                        try handler.perform([request])
+                    } catch {
+                        continuation.resume(returning: nil)
+                        return
+                    }
 
-        // Sample a 5x5 grid over the inner ~60% of the box (scales with box size), dropping holes.
-        let innerWidth = boxWidth * 0.6
-        let innerHeight = boxHeight * 0.6
-        let steps = 5
-        var samples: [Float] = []
-        samples.reserveCapacity(steps * steps)
+                    let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
+                    var detections: [Detection] = []
 
-        for row in 0..<steps {
-            for column in 0..<steps {
-                let offsetX = (Float(column) / Float(steps - 1) - 0.5) * innerWidth
-                let offsetY = (Float(row) / Float(steps - 1) - 0.5) * innerHeight
-                let normalizedX = min(max(centerX + offsetX, 0), 1)
-                let normalizedY = min(max(centerY + offsetY, 0), 1)
-                let pixelX = min(Int(normalizedX * Float(width)), width - 1)
-                let pixelY = min(Int(normalizedY * Float(height)), height - 1)
-                let rowPointer = base.advanced(by: pixelY * bytesPerRow)
-                let value = rowPointer.assumingMemoryBound(to: Float32.self)[pixelX]
-                if value.isFinite, value > 0 {
-                    samples.append(value)
-                }
+                    if let results = request.results as? [VNRecognizedObjectObservation] {
+                        for prediction in results.prefix(configuration.maxDetections) {
+                            let conf = prediction.labels[0].confidence
+                            guard conf >= configuration.confidenceThreshold else { continue }
+
+                            let visionBox = prediction.boundingBox
+                            // Vision uses bottom-left origin → convert to top-left.
+                            let box = TrackBox(
+                                x: Float(visionBox.minX),
+                                y: Float(1 - visionBox.maxY),
+                                width: Float(visionBox.width),
+                                height: Float(visionBox.height)
+                            )
+
+                            // Sample true Z depth at the box centre (nil on non-depth devices).
+                            let depth = DepthSampler.sample(
+                                in: wrapper.depthBuffer,
+                                centerX: box.x + box.width * 0.5,
+                                centerY: box.y + box.height * 0.5,
+                                boxWidth: box.width,
+                                boxHeight: box.height
+                            )
+
+                            detections.append(
+                                Detection(
+                                    box: box,
+                                    confidence: conf,
+                                    label: prediction.labels[0].identifier,
+                                    depth: depth
+                                )
+                            )
+                        }
+                    }
+
+                    // Estimate global camera motion (previous → current) for CMC — identity on the
+                    // first frame or when registration fails.
+                    let cameraMotion =
+                        previousWrapper.map {
+                            motionEstimator.estimate(
+                                previous: $0.pixelBuffer,
+                                current: wrapper.pixelBuffer
+                            )
+                        } ?? .identity
+
+                    continuation.resume(returning: (detections, inferenceTime, cameraMotion))
+                #else
+                    continuation.resume(returning: nil)
+                #endif
             }
         }
-
-        guard samples.count >= 3 else { return nil }
-        samples.sort()
-        // Low (~20th) percentile = the near surface within the box, robust to background bleed.
-        let index = Int(Float(samples.count - 1) * 0.20)
-        return samples[index]
     }
 
     // MARK: - Single Image Detection
@@ -449,6 +438,60 @@ actor ObjectDetectionClientActor {
         for continuation in resultContinuations.values {
             continuation.yield(result)
         }
+    }
+}
+
+// MARK: - DepthSampler
+
+/// Samples metric depth (metres) at a detection's centre from the depth map attached to the frame.
+private enum DepthSampler {
+    /// Returns the ~20th percentile of valid samples over the inner ~60% of the box (robust to
+    /// see-through background / partial occlusion), or `nil` when no depth is available.
+    static func sample(
+        in depthBuffer: CVPixelBuffer?,
+        centerX: Float,
+        centerY: Float,
+        boxWidth: Float,
+        boxHeight: Float
+    ) -> Float? {
+        guard let depthBuffer else { return nil }
+        let width = CVPixelBufferGetWidth(depthBuffer)
+        let height = CVPixelBufferGetHeight(depthBuffer)
+        guard width > 0, height > 0 else { return nil }
+
+        CVPixelBufferLockBaseAddress(depthBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(depthBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(depthBuffer) else { return nil }
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(depthBuffer)
+
+        // Sample a 5x5 grid over the inner ~60% of the box (scales with box size), dropping holes.
+        let innerWidth = boxWidth * 0.6
+        let innerHeight = boxHeight * 0.6
+        let steps = 5
+        var samples: [Float] = []
+        samples.reserveCapacity(steps * steps)
+
+        for row in 0..<steps {
+            for column in 0..<steps {
+                let offsetX = (Float(column) / Float(steps - 1) - 0.5) * innerWidth
+                let offsetY = (Float(row) / Float(steps - 1) - 0.5) * innerHeight
+                let normalizedX = min(max(centerX + offsetX, 0), 1)
+                let normalizedY = min(max(centerY + offsetY, 0), 1)
+                let pixelX = min(Int(normalizedX * Float(width)), width - 1)
+                let pixelY = min(Int(normalizedY * Float(height)), height - 1)
+                let rowPointer = base.advanced(by: pixelY * bytesPerRow)
+                let value = rowPointer.assumingMemoryBound(to: Float32.self)[pixelX]
+                if value.isFinite, value > 0 {
+                    samples.append(value)
+                }
+            }
+        }
+
+        guard samples.count >= 3 else { return nil }
+        samples.sort()
+        // Low (~20th) percentile = the near surface within the box, robust to background bleed.
+        let index = Int(Float(samples.count - 1) * 0.20)
+        return samples[index]
     }
 }
 
