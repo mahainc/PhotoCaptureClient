@@ -4,13 +4,14 @@ import PackageDescription
 let package = Package(
     name: "PhotoCaptureClient",
     platforms: [
-        .iOS(.v17), .macOS(.v14)
+        .iOS(.v17), .macOS(.v14),
     ],
     products: [
         .singleTargetLibrary("PhotoCaptureClient"),
         .singleTargetLibrary("PhotoCaptureClientLive"),
         .singleTargetLibrary("ObjectDetectionClient"),
         .singleTargetLibrary("ObjectDetectionClientLive"),
+        .singleTargetLibrary("ObjectTracking"),
         .singleTargetLibrary("MultiCamClient"),
         .singleTargetLibrary("MultiCamClientLive"),
     ],
@@ -18,27 +19,23 @@ let package = Package(
         .package(
             url: "https://github.com/pointfreeco/swift-composable-architecture.git",
             from: "1.25.5"
-        ),
-        .package(
-            url: "https://github.com/ultralytics/yolo-ios-app.git",
-            from: "8.8.7"
-        ),
+        )
     ],
     targets: [
         .target(
             name: "PhotoCaptureClient",
             dependencies: [
-                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture")
             ]
         ),
         .target(
             name: "PhotoCaptureClientLive",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
-                "PhotoCaptureClient"
+                "PhotoCaptureClient",
             ],
             resources: [
-                .process("Shaders.metal"),
+                .process("Shaders.metal")
             ],
             linkerSettings: [
                 .linkedFramework("Metal"),
@@ -48,20 +45,23 @@ let package = Package(
         .target(
             name: "ObjectDetectionClient",
             dependencies: [
-                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture")
             ]
         ),
         .target(
             name: "ObjectDetectionClientLive",
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
-                .product(name: "YOLO", package: "yolo-ios-app", condition: .when(platforms: [.iOS])),
                 "ObjectDetectionClient",
+                "ObjectTracking",
                 "PhotoCaptureClient",
             ],
             resources: [
-                .copy("Resources/yolo11n.mlpackage"),
+                .copy("Resources/yolo11n.mlpackage")
             ]
+        ),
+        .target(
+            name: "ObjectTracking"
         ),
         .target(
             name: "MultiCamClient",
@@ -78,7 +78,7 @@ let package = Package(
                 "PhotoCaptureClient",
             ],
             resources: [
-                .process("Shaders.metal"),
+                .process("Shaders.metal")
             ],
             linkerSettings: [
                 .linkedFramework("Metal"),
@@ -88,19 +88,25 @@ let package = Package(
         .testTarget(
             name: "MultiCamClientTests",
             dependencies: [
-                "MultiCamClient",
+                "MultiCamClient"
             ]
         ),
         .testTarget(
             name: "PhotoCaptureClientTests",
             dependencies: [
-                "PhotoCaptureClient",
+                "PhotoCaptureClient"
             ]
         ),
         .testTarget(
             name: "ObjectDetectionClientTests",
             dependencies: [
-                "ObjectDetectionClient",
+                "ObjectDetectionClient"
+            ]
+        ),
+        .testTarget(
+            name: "ObjectTrackingTests",
+            dependencies: [
+                "ObjectTracking"
             ]
         ),
     ]
