@@ -209,13 +209,21 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
             ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
     }
 
-    /// Pick the highest-resolution device format that supports depth, paired with a depth format
+    /// Pick the best-quality device format that supports depth, paired with a depth format
     /// (preferring 16-bit). Returns `nil` when the device delivers no depth.
+    ///
+    /// Selecting a depth-capable format puts the session into input-priority mode, so this
+    /// format — not the `.photo` preset — drives the live preview resolution. Ranking by raw
+    /// pixel count alone tends to pick a **binned** format (faster but soft/noisy), which
+    /// visibly degrades the preview. We therefore rank quality-first: prefer non-binned video
+    /// over binned, then prefer larger video dimensions.
     private static func depthCapableFormat(
         for device: AVCaptureDevice
     ) -> (format: AVCaptureDevice.Format, depthFormat: AVCaptureDevice.Format)? {
         var best: (AVCaptureDevice.Format, AVCaptureDevice.Format)?
-        var bestPixels = 0
+        // Rank key: (non-binned wins, then larger pixel count). A non-binned format always
+        // beats any binned one regardless of resolution.
+        var bestRank: (nonBinned: Bool, pixels: Int) = (false, 0)
         for format in device.formats where !format.supportedDepthDataFormats.isEmpty {
             let depthFormats = format.supportedDepthDataFormats
             let preferredDepth =
@@ -226,8 +234,13 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
             guard let depthFormat = preferredDepth else { continue }
             let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
             let pixels = Int(dimensions.width) * Int(dimensions.height)
-            if pixels > bestPixels {
-                bestPixels = pixels
+            let nonBinned = !format.isVideoBinned
+            // Lexicographic compare: non-binned dominates; ties broken by resolution.
+            let isBetter =
+                (nonBinned && !bestRank.nonBinned)
+                || (nonBinned == bestRank.nonBinned && pixels > bestRank.pixels)
+            if best == nil || isBetter {
+                bestRank = (nonBinned, pixels)
                 best = (format, depthFormat)
             }
         }
