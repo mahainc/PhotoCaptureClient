@@ -50,7 +50,25 @@
             static let sameObjectMaxDistance: Float = 0.08
             /// How long to keep the dot on its last target after it drops out of the candidate set
             /// (bridges brief edge-clips / confidence dips of the nearest object).
-            static let holdDuration: CFTimeInterval = 0.5
+            ///
+            /// One second, not half: detections arrive at roughly 3fps, so half a second
+            /// bridged a single missed frame and a two-frame gap blinked the dot. The
+            /// tracker already coasts a track for `maxAge` frames — about a second at this
+            /// cadence — so this now outlasts exactly what the tracker is willing to
+            /// forgive, instead of hiding a dot the tracker still believes in.
+            static let holdDuration: CFTimeInterval = 1.0
+            /// How long a candidate must have been tracked before it may take the dot away
+            /// from the object it is already on.
+            ///
+            /// The detector emits short-lived false positives — two or three frames of a
+            /// "laptop" that is not there — and some land nearer the camera than the real
+            /// subject. Without this each one satisfied the depth margin, took the dot,
+            /// vanished, and handed it back: measured on a still camera, the dot appeared
+            /// to drop and re-acquire the same object while nothing had moved.
+            ///
+            /// It gates *stealing* only. A candidate of any age may take an empty dot, so
+            /// first acquisition stays immediate.
+            static let minimumAgeToSteal: TimeInterval = 0.8
             /// 1€ filter for same-object pointer smoothing: a low cutoff kills jitter when still, β
             /// raises the cutoff with speed to cut lag. Conservative — the tracker's Kalman already
             /// damps box jitter, so this only removes residual high-frequency noise.
@@ -76,6 +94,8 @@
             let color: SIMD4<Float>
             /// Metric depth in metres (smaller = nearer); `nil` when depth couldn't be sampled.
             let depth: Float?
+            /// How long the upstream tracker has held this object, in seconds.
+            let trackedSeconds: TimeInterval
             /// Normalized screen-space distance from the frame center (0 = centered, ≈0.7 at a corner).
             let proximity: Float
         }
@@ -283,6 +303,7 @@
                     ),
                     color: overlay.color,
                     depth: overlay.depth,
+                    trackedSeconds: overlay.trackedSeconds,
                     proximity: (proximityX * proximityX + proximityY * proximityY).squareRoot()
                 )
             }
@@ -362,7 +383,11 @@
             } else {
                 isDifferentObject = best.texCenter != current.texCenter
             }
-            if isDifferentObject, isClearlyNearer(best, than: current) {
+            // A candidate the tracker has barely met does not get to take the dot, however
+            // near it measures: most of those are false positives that will be gone in two
+            // frames, and handing them the dot is what made it flicker.
+            let isOldEnoughToSteal = best.trackedSeconds >= Tuning.minimumAgeToSteal
+            if isDifferentObject, isOldEnoughToSteal, isClearlyNearer(best, than: current) {
                 return .show(best, isSwitch: true)
             }
             return .show(current, isSwitch: false)

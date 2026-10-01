@@ -257,6 +257,10 @@ extension PhotoCaptureClient {
         /// Stable per-object tracking ID. The centre-dot overlay ID-locks onto this so it follows
         /// the same object across frames instead of "nearest box this frame". `nil` when untracked.
         public let trackID: UUID?
+        /// How long this object has been tracked, in seconds. The centre dot refuses to be taken
+        /// from its current target by anything younger than `Tuning.minimumAgeToSteal`, which is
+        /// what stops a two-frame false positive from yanking the dot away and back.
+        public let trackedSeconds: TimeInterval
 
         public init(
             x: Float,
@@ -267,7 +271,8 @@ extension PhotoCaptureClient {
             confidence: Float? = nil,
             color: SIMD4<Float> = SIMD4<Float>(0, 1, 0, 1),
             depth: Float? = nil,
-            trackID: UUID? = nil
+            trackID: UUID? = nil,
+            trackedSeconds: TimeInterval = 0
         ) {
             self.x = x
             self.y = y
@@ -278,6 +283,7 @@ extension PhotoCaptureClient {
             self.color = color
             self.depth = depth
             self.trackID = trackID
+            self.trackedSeconds = trackedSeconds
         }
     }
 }
