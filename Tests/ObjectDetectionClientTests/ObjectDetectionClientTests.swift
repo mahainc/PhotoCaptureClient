@@ -84,7 +84,8 @@ final class ObjectDetectionClientTests: XCTestCase {
         let defaultConfig = ObjectDetectionClient.Configuration.default
         XCTAssertEqual(defaultConfig.modelName, "yolo11n")
         XCTAssertEqual(defaultConfig.confidenceThreshold, 0.25)
-        XCTAssertEqual(defaultConfig.maxDetections, 20)
+        XCTAssertEqual(defaultConfig.maxDetections, 10)
+        XCTAssertNil(defaultConfig.dwellSeconds, "dwell cropping is opt-in")
 
         let fast = ObjectDetectionClient.Configuration.fast
         XCTAssertEqual(fast.confidenceThreshold, 0.5)
@@ -92,7 +93,46 @@ final class ObjectDetectionClientTests: XCTestCase {
 
         let highAccuracy = ObjectDetectionClient.Configuration.highAccuracy
         XCTAssertEqual(highAccuracy.confidenceThreshold, 0.1)
-        XCTAssertEqual(highAccuracy.maxDetections, 50)
+        XCTAssertEqual(highAccuracy.maxDetections, 15)
+    }
+
+    /// `trackedSeconds` defaults to zero so a detection built without a tracker — the
+    /// single-image path, and every caller that omits it — reports no history rather than
+    /// an accidental age.
+    func testDetectedObjectReportsNoAgeByDefault() {
+        let object = ObjectDetectionClient.DetectedObject(
+            label: "mug",
+            confidence: 0.9,
+            boundingBox: .init(x: 0, y: 0, width: 0.1, height: 0.1)
+        )
+        XCTAssertEqual(object.trackedSeconds, 0)
+    }
+
+    /// The `dwelling` mock exists so dwell behaviour can be tested at all: `happy` mints a
+    /// fresh `UUID` per emission, which makes every frame look like a new object and lets
+    /// no age accumulate.
+    func testDwellingMockHoldsOneIdentityAndMaturesOnce() async {
+        let client = ObjectDetectionClient.dwelling(
+            dwellSeconds: 1,
+            frameInterval: 0.5,
+            frames: 6
+        )
+
+        var ids: Set<UUID> = []
+        var ages: [TimeInterval] = []
+        var maturedIDs: [UUID] = []
+        for await result in await client.detectionResults() {
+            if let object = result.objects.first {
+                ids.insert(object.id)
+                ages.append(object.trackedSeconds)
+            }
+            maturedIDs.append(contentsOf: result.maturedObjects.map(\.id))
+        }
+
+        XCTAssertEqual(ids.count, 1, "one object held in view is one identity")
+        XCTAssertEqual(ages, [0, 0.5, 1.0, 1.5, 2.0, 2.5], "age accumulates in real time")
+        XCTAssertEqual(maturedIDs.count, 1, "an object matures once, however long it stays")
+        XCTAssertEqual(maturedIDs.first, ids.first)
     }
 
     func testDetectedObjectIdentifiable() {

@@ -16,6 +16,20 @@ public final class Track {
     public private(set) var hits: Int = 1
     public private(set) var timeSinceUpdate: Int = 0
 
+    /// How long this track has existed, in seconds of real elapsed time.
+    ///
+    /// Accumulated from `dt` rather than counted in frames: `dt` is clamped and the
+    /// camera's cadence is irregular, so `hits` multiplied by any nominal interval
+    /// would drift. Consumers that act after an object has been held for a wall-clock
+    /// duration need the wall clock.
+    ///
+    /// Counts coasted frames too, and never resets — unlike `coastedSeconds`, which
+    /// measures only the current gap. A track that blinks out for two frames and is
+    /// re-acquired has still been in view the whole time, which is what the tracker
+    /// coasts it for. A track that stays missing past `maxAge` is deleted instead, so
+    /// the next sighting is a new track aged from zero.
+    public private(set) var trackedSeconds: Float = 0
+
     /// Real elapsed time (seconds) since the last real observation — accumulated across coasted frames
     /// so OC-SORT re-seeds velocity correctly even under irregular frame cadence.
     private var coastedSeconds: Float = 0
@@ -97,6 +111,7 @@ public final class Track {
         height.predict(dt: dt)
         timeSinceUpdate += 1
         coastedSeconds += dt
+        trackedSeconds += dt
     }
 
     /// Shift the prediction into the current frame to cancel camera motion (BoT-SORT CMC), and

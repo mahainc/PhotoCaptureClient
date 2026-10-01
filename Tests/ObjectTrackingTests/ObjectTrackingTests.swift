@@ -129,6 +129,59 @@ final class ObjectTrackingTests: XCTestCase {
         XCTAssertTrue(tracker.update(detections: [], dt: dt).isEmpty)
     }
 
+    // MARK: - Age
+
+    /// `trackedSeconds` is what a consumer waits on to decide an object has been held in
+    /// view, so it has to measure the wall clock and not the frame count: `dt` is clamped
+    /// and the camera's cadence is irregular.
+    func testTrackedSecondsAccumulatesRealTime() {
+        let tracker = MultiObjectTracker(config: TrackerConfiguration())
+        _ = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+        let first = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+        XCTAssertEqual(first[0].trackedSeconds, dt, accuracy: 0.001)
+
+        let later = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+        XCTAssertEqual(later[0].trackedSeconds, dt * 2, accuracy: 0.001)
+    }
+
+    /// Age keeps running while the tracker coasts a track through a dropout. The object
+    /// never left; the detector only lost sight of it, which is the whole reason coasting
+    /// exists.
+    func testTrackedSecondsKeepsRunningThroughDropout() {
+        let tracker = MultiObjectTracker(config: TrackerConfiguration())
+        _ = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+        _ = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+
+        let coasted = tracker.update(detections: [], dt: dt)
+        XCTAssertEqual(coasted[0].trackedSeconds, dt * 2, accuracy: 0.001)
+
+        let reacquired = tracker.update(detections: [det(0.52, 0.5)], dt: dt)
+        XCTAssertEqual(
+            reacquired[0].trackedSeconds,
+            dt * 3,
+            accuracy: 0.001,
+            "re-acquiring must not reset the age — unlike coastedSeconds, which measures only the gap"
+        )
+    }
+
+    /// A track that stays missing past `maxAge` is deleted, so the next sighting is a new
+    /// object aged from zero. A consumer that crops on dwell therefore gets a fresh crop
+    /// for it, which is correct: it cannot know it is the same thing.
+    func testRetiredTrackReturnsWithFreshAge() {
+        let tracker = MultiObjectTracker(config: TrackerConfiguration(maxAge: 1))
+        _ = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+        let before = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+        XCTAssertGreaterThan(before[0].trackedSeconds, 0)
+
+        _ = tracker.update(detections: [], dt: dt)
+        XCTAssertTrue(tracker.update(detections: [], dt: dt).isEmpty, "retired")
+
+        _ = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+        let after = tracker.update(detections: [det(0.5, 0.5)], dt: dt)
+        XCTAssertNotEqual(after[0].id, before[0].id)
+        XCTAssertEqual(after[0].trackedSeconds, dt, accuracy: 0.001)
+    }
+
     // MARK: - Crossing (exercises OCM; asserts no ID swap)
 
     func testNoIDSwapThroughCrossing() {

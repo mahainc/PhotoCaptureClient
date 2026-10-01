@@ -28,19 +28,27 @@ extension ObjectDetectionClient {
         /// capture device delivers no depth (single-camera devices, simulator) — consumers then fall
         /// back to centre-proximity for "nearest object" ranking.
         public let depth: Float?
+        /// How long this object has been continuously tracked, in seconds.
+        ///
+        /// Real elapsed time, not a frame count, and it survives the brief dropouts the
+        /// tracker coasts through. `0` from `detectInImage`, which runs no tracker and has
+        /// no history to report.
+        public let trackedSeconds: TimeInterval
 
         public init(
             id: UUID = UUID(),
             label: String,
             confidence: Float,
             boundingBox: BoundingBox,
-            depth: Float? = nil
+            depth: Float? = nil,
+            trackedSeconds: TimeInterval = 0
         ) {
             self.id = id
             self.label = label
             self.confidence = confidence
             self.boundingBox = boundingBox
             self.depth = depth
+            self.trackedSeconds = trackedSeconds
         }
     }
 }
@@ -72,10 +80,38 @@ extension ObjectDetectionClient {
 // MARK: - DetectionResult
 
 extension ObjectDetectionClient {
+    /// An object that has just been held in view long enough to be worth keeping, with
+    /// the frame it was cut from.
+    ///
+    /// Cropped inside the detection pass, where the frame that produced the box is still
+    /// in hand. Anything that fetched a frame afterwards would be cropping frame N's box
+    /// out of frame N+k, by which time the subject has moved.
+    public struct MaturedObject: Sendable, Equatable, Identifiable {
+        /// The tracking id of the object, stable across frames.
+        public let id: UUID
+        public let label: String
+        /// JPEG bytes of the object's crop, with the detector's padding applied.
+        public let croppedData: Data
+
+        public init(
+            id: UUID,
+            label: String,
+            croppedData: Data
+        ) {
+            self.id = id
+            self.label = label
+            self.croppedData = croppedData
+        }
+    }
+
     /// A single frame's detection result.
     public struct DetectionResult: Sendable, Equatable {
         /// All detected objects in this frame.
         public let objects: [DetectedObject]
+        /// Objects that crossed `Configuration.dwellSeconds` on *this* frame, already cut
+        /// out of it. Empty on almost every frame, and each object appears at most once
+        /// for the life of its track.
+        public let maturedObjects: [MaturedObject]
         /// Inference time in milliseconds.
         public let inferenceTimeMs: Double
         /// Timestamp of the frame.
@@ -83,10 +119,12 @@ extension ObjectDetectionClient {
 
         public init(
             objects: [DetectedObject] = [],
+            maturedObjects: [MaturedObject] = [],
             inferenceTimeMs: Double = 0,
             timestamp: Date = .now
         ) {
             self.objects = objects
+            self.maturedObjects = maturedObjects
             self.inferenceTimeMs = inferenceTimeMs
             self.timestamp = timestamp
         }
@@ -110,19 +148,25 @@ extension ObjectDetectionClient {
         public var iouThreshold: Float
         /// Maximum number of detections per frame.
         public var maxDetections: Int
+        /// How long an object must stay in view before it is cropped out of the live frame
+        /// and reported in `DetectionResult.maturedObjects`. `nil` disables that entirely,
+        /// and nothing is cropped.
+        public var dwellSeconds: TimeInterval?
 
         public init(
             modelName: String = "yolo11n",
             confidenceThreshold: Float = 0.25,
             highConfidenceThreshold: Float = 0.6,
             iouThreshold: Float = 0.45,
-            maxDetections: Int = 10
+            maxDetections: Int = 10,
+            dwellSeconds: TimeInterval? = nil
         ) {
             self.modelName = modelName
             self.confidenceThreshold = confidenceThreshold
             self.highConfidenceThreshold = highConfidenceThreshold
             self.iouThreshold = iouThreshold
             self.maxDetections = maxDetections
+            self.dwellSeconds = dwellSeconds
         }
     }
 }

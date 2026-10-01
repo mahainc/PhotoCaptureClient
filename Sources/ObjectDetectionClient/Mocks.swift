@@ -82,6 +82,59 @@ extension ObjectDetectionClient {
         }
     )
 
+    /// One object held in view, ageing, and maturing once.
+    ///
+    /// The `happy` mock mints a fresh `UUID` on every emission, which makes it useless for
+    /// anything keyed on track identity — a consumer timing a dwell sees a brand-new
+    /// object each frame and never accumulates. This one keeps a single id across the whole
+    /// stream and raises `trackedSeconds` with it, then reports the object as matured on
+    /// the frame it crosses `dwellSeconds`, exactly once.
+    public static func dwelling(
+        dwellSeconds: TimeInterval = 2,
+        frameInterval: TimeInterval = 0.333,
+        frames: Int = 12
+    ) -> Self {
+        let id = UUID()
+        let box = BoundingBox(x: 0.4, y: 0.4, width: 0.2, height: 0.2)
+        return Self(
+            currentMode: { .auto },
+            startDetection: { _ in },
+            stopDetection: {},
+            detectionResults: {
+                AsyncStream { continuation in
+                    Task {
+                        var matured = false
+                        for frame in 0..<frames {
+                            let age = TimeInterval(frame) * frameInterval
+                            let isMaturingNow = !matured && age >= dwellSeconds
+                            if isMaturingNow { matured = true }
+                            continuation.yield(
+                                DetectionResult(
+                                    objects: [
+                                        DetectedObject(
+                                            id: id,
+                                            label: "mug",
+                                            confidence: 0.9,
+                                            boundingBox: box,
+                                            trackedSeconds: age
+                                        )
+                                    ],
+                                    maturedObjects: isMaturingNow
+                                        ? [MaturedObject(id: id, label: "mug", croppedData: Data())]
+                                        : [],
+                                    inferenceTimeMs: 20,
+                                    timestamp: .now
+                                )
+                            )
+                        }
+                        continuation.finish()
+                    }
+                }
+            },
+            detectInImage: { _ in DetectionResult() }
+        )
+    }
+
     /// All operations that can fail throw errors.
     public static let failing = Self(
         currentMode: { .manual },

@@ -1,3 +1,4 @@
+import CoreImage
 import CoreML
 import CoreVideo
 import Foundation
@@ -19,6 +20,12 @@ actor ObjectDetectionClientActor {
     private var labels: [String] = []
     private var configuration: ObjectDetectionClient.Configuration?
     private var resultContinuations: [UUID: AsyncStream<ObjectDetectionClient.DetectionResult>.Continuation] = [:]
+    /// Tracks already cropped, so each object is cut out once however long it stays.
+    ///
+    /// Pruned against the live track ids every frame rather than grown forever: a long
+    /// session over a busy scene mints tracks continuously, and this would otherwise
+    /// retain a UUID for every object the camera ever saw.
+    private var croppedTrackIDs: Set<UUID> = []
     private var frameProcessingTask: Task<Void, Never>?
 
     /// Track-by-detection layer: turns identity-less per-frame detections into stable, coasted tracks.
@@ -182,6 +189,7 @@ actor ObjectDetectionClientActor {
         motionEstimator = nil
         lastFrameTimestamp = nil
         previousFrameWrapper = nil
+        croppedTrackIDs.removeAll()
 
         for continuation in resultContinuations.values {
             continuation.finish()
@@ -225,9 +233,19 @@ actor ObjectDetectionClientActor {
                     width: track.box.width,
                     height: track.box.height
                 ),
-                depth: track.depth
+                depth: track.depth,
+                trackedSeconds: TimeInterval(track.trackedSeconds)
             )
         }
+
+        // Forget tracks the tracker has retired, so the set stays the size of the scene
+        // rather than the size of the session.
+        croppedTrackIDs.formIntersection(tracks.map(\.id))
+        let matured = await cropMaturedObjects(
+            tracks: tracks,
+            wrapper: wrapper,
+            dwellSeconds: configuration.dwellSeconds
+        )
 
         #if DEBUG
             if !objects.isEmpty {
@@ -247,11 +265,103 @@ actor ObjectDetectionClientActor {
         yieldResult(
             ObjectDetectionClient.DetectionResult(
                 objects: objects,
+                maturedObjects: matured,
                 inferenceTimeMs: raw.inferenceMs,
                 timestamp: wrapper.timestamp
             )
         )
     }
+
+    /// Cut out every track that has just crossed the dwell threshold.
+    ///
+    /// Runs off the actor, on the inference queue: a JPEG encode is long enough that doing
+    /// it under actor isolation would hold up the next frame's detection.
+    private func cropMaturedObjects(
+        tracks: [Track],
+        wrapper: PhotoCaptureClient.PixelBufferWrapper,
+        dwellSeconds: TimeInterval?
+    ) async -> [ObjectDetectionClient.MaturedObject] {
+        guard let dwellSeconds else { return [] }
+
+        let ripe = tracks.filter { track in
+            TimeInterval(track.trackedSeconds) >= dwellSeconds
+                && !croppedTrackIDs.contains(track.id)
+        }
+        guard !ripe.isEmpty else { return [] }
+
+        // Marked before the crop, not after: the crop is awaited, and a second frame
+        // arriving in between would otherwise see the same track as uncropped and cut it
+        // twice.
+        for track in ripe {
+            croppedTrackIDs.insert(track.id)
+        }
+
+        let requests = ripe.map { (id: $0.id, label: $0.label, box: $0.box) }
+        return await withCheckedContinuation { continuation in
+            inferenceQueue.async {
+                let context = CIContext(options: [.useSoftwareRenderer: false])
+                let image = CIImage(cvPixelBuffer: wrapper.pixelBuffer)
+                let cropped = requests.compactMap { request in
+                    Self.crop(image, to: request.box, in: context).map { data in
+                        ObjectDetectionClient.MaturedObject(
+                            id: request.id,
+                            label: request.label,
+                            croppedData: data
+                        )
+                    }
+                }
+                continuation.resume(returning: cropped)
+            }
+        }
+    }
+
+    /// One object's crop as JPEG bytes, padded and capped for a thumbnail.
+    ///
+    /// The box is normalised with a top-left origin; Core Image measures y upward from the
+    /// bottom, so the rect is flipped before it cuts.
+    private static func crop(
+        _ image: CIImage,
+        to box: TrackBox,
+        in context: CIContext
+    ) -> Data? {
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+
+        let width = CGFloat(box.width) * extent.width
+        let height = CGFloat(box.height) * extent.height
+        let padding = max(width, height) * Self.cropPaddingRatio
+        let originX = max(0, CGFloat(box.x) * extent.width - padding)
+        let topOriginY = max(0, CGFloat(box.y) * extent.height - padding)
+        let paddedWidth = min(extent.width - originX, width + padding * 2)
+        let paddedHeight = min(extent.height - topOriginY, height + padding * 2)
+        guard paddedWidth > 0, paddedHeight > 0 else { return nil }
+
+        let rect = CGRect(
+            x: extent.minX + originX,
+            y: extent.minY + extent.height - topOriginY - paddedHeight,
+            width: paddedWidth,
+            height: paddedHeight
+        )
+
+        var cut = image.cropped(to: rect)
+        let longestEdge = max(cut.extent.width, cut.extent.height)
+        if longestEdge > Self.cropMaxDimension {
+            let scale = Self.cropMaxDimension / longestEdge
+            cut = cut.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        }
+        return context.jpegRepresentation(
+            of: cut,
+            colorSpace: CGColorSpaceCreateDeviceRGB(),
+            options: [:]
+        )
+    }
+
+    /// Context kept around the detector's box, as a fraction of its longer side. The model
+    /// brackets an object tightly and a crop with no margin reads as a mistake.
+    private static let cropPaddingRatio: CGFloat = 0.1
+    /// Longest edge of a crop. These are thumbnails held in memory by the consumer, not
+    /// the full-resolution image a scan would want.
+    private static let cropMaxDimension: CGFloat = 360
 
     /// Run YOLO inference for one frame off the actor (on `inferenceQueue`), sampling per-box depth and
     /// estimating camera motion versus the previous frame. Returns `nil` on non-iOS or a Vision failure.
