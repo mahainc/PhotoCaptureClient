@@ -12,3 +12,7 @@ xcuserdata/
 /yolo*.mlpackage
 
 .worktrees/
+
+# Model-export Python virtualenv (see scripts/export-models.sh) and clean-code state
+.venv-export/
+.claude/

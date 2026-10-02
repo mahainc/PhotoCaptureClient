@@ -57,7 +57,9 @@ let package = Package(
                 "PhotoCaptureClient",
             ],
             resources: [
-                .copy("Resources/yolo11n.mlpackage")
+                .copy("Resources/yolo26n.mlpackage"),
+                .copy("Resources/yolo26n-seg.mlpackage"),
+                .copy("Resources/yolo26n-depth.mlpackage"),
             ]
         ),
         .target(

@@ -136,7 +136,7 @@ extension ObjectDetectionClient {
 extension ObjectDetectionClient {
     /// Configuration for the detection engine.
     public struct Configuration: Sendable, Equatable {
-        /// Model name matching the bundled .mlmodelc resource (e.g., "yolo11n").
+        /// Model name matching the bundled .mlmodelc resource (e.g., "yolo26n").
         public var modelName: String
         /// Low detection floor (0.0-1.0): the model emits boxes at/above this. Kept low so the
         /// tracker's ByteTrack second stage can recover momentarily low-confidence boxes.
@@ -154,7 +154,7 @@ extension ObjectDetectionClient {
         public var dwellSeconds: TimeInterval?
 
         public init(
-            modelName: String = "yolo11n",
+            modelName: String = "yolo26n",
             confidenceThreshold: Float = 0.25,
             highConfidenceThreshold: Float = 0.6,
             iouThreshold: Float = 0.45,

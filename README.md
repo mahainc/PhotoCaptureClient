@@ -8,7 +8,7 @@ A multi-family TCA dependency client wrapping AVFoundation capture, on-device YO
 
 **Object detection family**
 - **`ObjectDetectionClient`** — interface for on-device detection: start / stop, result `AsyncStream<DetectionResult>`, single-image detection.
-- **`ObjectDetectionClientLive`** — `YOLO` (Ultralytics) wrapper bundling the `yolo11n.mlpackage` Core ML model.
+- **`ObjectDetectionClientLive`** — `YOLO` (Ultralytics) wrapper bundling the `yolo26n.mlpackage` Core ML model.
 
 **Multi-cam family**
 - **`MultiCamClient`** — interface for `AVCaptureMultiCamSession`-driven layouts (grid, PiP), per-camera zoom and stabilization.

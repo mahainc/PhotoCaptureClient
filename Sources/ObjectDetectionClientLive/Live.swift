@@ -7,7 +7,8 @@ import PhotoCaptureClient
 /// current dependency context to access the pixel buffer stream.
 extension ObjectDetectionClient: DependencyKey {
 	public static let liveValue: ObjectDetectionClient = {
-		let actor = ObjectDetectionClientActor()
+		let actor = ObjectDetectionClientActor(logger: { DiagnosticLog.shared.log($0) })
+		let segmentationEngine = SegmentationEngine()
 
 		return ObjectDetectionClient(
 			currentMode: {
@@ -28,6 +29,9 @@ extension ObjectDetectionClient: DependencyKey {
 			},
 			detectInImage: { imageData in
 				try await actor.detectInImage(imageData)
+			},
+			segmentInImage: { imageData in
+				try await segmentationEngine.segment(imageData)
 			}
 		)
 	}()

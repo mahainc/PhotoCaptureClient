@@ -12,7 +12,7 @@ import Foundation
 /// ```swift
 /// @Dependency(\.objectDetection) var objectDetection
 ///
-/// // Start auto detection (loads bundled yolo11n model)
+/// // Start auto detection (loads bundled yolo26n model)
 /// try await objectDetection.startDetection(.default)
 ///
 /// // Observe results
@@ -32,7 +32,7 @@ public struct ObjectDetectionClient: Sendable {
     public var startDetection: @Sendable (_ configuration: Configuration) async throws -> Void
 
     /// Switch to manual mode: stops detection and unloads the model.
-    public var stopDetection: @Sendable () async -> Void = { }
+    public var stopDetection: @Sendable () async -> Void = {}
 
     // MARK: - Detection Results
 
@@ -43,4 +43,10 @@ public struct ObjectDetectionClient: Sendable {
 
     /// Run detection on a single image (Data = JPEG/PNG bytes). Works regardless of mode.
     public var detectInImage: @Sendable (_ imageData: Data) async throws -> DetectionResult
+
+    // MARK: - Single Image Segmentation
+
+    /// Segment a single image (Data = JPEG/PNG bytes), returning each object with a
+    /// background-removed PNG cutout. Works regardless of mode.
+    public var segmentInImage: @Sendable (_ imageData: Data) async throws -> SegmentationResult
 }

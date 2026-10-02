@@ -6,10 +6,10 @@
 
     // MARK: - Detection Dot Overlay View
 
-    /// Draws a single colored dot at the center of the fully-visible detected object that is
-    /// *nearest the camera* — ranked by true Z depth (LiDAR / dual camera) when available, falling
-    /// back to center-proximity (the object you're aiming at) on devices/simulator without depth.
-    /// Used by the `.centerDot` overlay style in place of bounding boxes.
+    /// Draws a single colored dot at the center of the fully-visible detected object the user is
+    /// *aiming at* — ranked center-first: the object nearest the frame center wins, and true Z depth
+    /// (LiDAR / dual camera) only decides between objects that are comparably centered, picking the
+    /// nearer one. Used by the `.centerDot` overlay style in place of bounding boxes.
     ///
     /// Detections carry a stable per-object track ID (from the upstream multi-object tracker), so the
     /// view ID-locks onto its current target and follows that identity across frames — falling back to
@@ -38,9 +38,16 @@
             /// Absolute depth floor (metres) for the switch margin, so very near objects don't chatter
             /// when the relative margin shrinks to noise.
             static let switchDepthFloor: Float = 0.03
-            /// In the depth-less fallback, a challenger must be this fraction closer to the frame
-            /// center than the current target before switching. Tuned high for confident commitment.
+            /// A challenger must be this fraction closer to the frame center than the current target
+            /// before the dot switches to it. Tuned high for confident commitment.
             static let switchProximityFraction: Float = 0.30
+            /// Absolute center-proximity floor for the switch margin, so an already-centered target
+            /// doesn't chatter when the relative margin shrinks to noise.
+            static let switchProximityFloor: Float = 0.05
+            /// How close in center-proximity two objects must be to count as "both centered", where
+            /// depth — not position — decides between them. Center is the primary signal: the user
+            /// aims at what they mean, so a nearer object only wins when it is just as centered.
+            static let centreTieBand: Float = 0.08
             /// Metres added beyond the farthest valid depth in a frame to rank objects whose depth
             /// couldn't be sampled — they fall behind any object with a real reading, but stay ordered
             /// among themselves by center-proximity.
@@ -309,8 +316,9 @@
             }
         }
 
-        /// Decide what the dot should do this frame, ranking by nearest depth (with center-proximity
-        /// fallback) and applying stickiness + the hold grace window.
+        /// Decide what the dot should do this frame, ranking center-first — the object nearest the
+        /// frame center wins, and depth only separates objects that are comparably centered — then
+        /// applying stickiness + the hold grace window.
         private func decideTarget(
             candidates: [Candidate],
             now: CFTimeInterval
@@ -320,39 +328,46 @@
                 return withinHold(now) ? .hold : .hide
             }
 
-            // Primary ranking scalar: metric depth when available; otherwise a penalty placed just
+            // Depth tiebreaker scalar: metric depth when available; otherwise a penalty placed just
             // beyond the farthest real reading so depth-less candidates rank behind any real one but
-            // stay ordered among themselves by center-proximity. With no depth at all every primary
-            // collapses to 0 and proximity decides — one continuous key, no per-frame metric flip.
+            // stay ordered among themselves. Consulted only between objects that are comparably
+            // centered — center-proximity is the primary key.
             let penaltyBase = candidates.compactMap(\.depth).max()
-            func primary(_ candidate: Candidate) -> Float {
+            func depthKey(_ candidate: Candidate) -> Float {
                 if let depth = candidate.depth { return depth }
                 if let base = penaltyBase { return base + Tuning.depthlessPenalty }
                 return 0
             }
+            // Center-first: the object nearer the frame center wins outright; depth decides only
+            // between objects within `centreTieBand` of each other ("both centered").
             func isBetter(
                 _ lhs: Candidate,
                 _ rhs: Candidate
             ) -> Bool {
-                let leftPrimary = primary(lhs)
-                let rightPrimary = primary(rhs)
-                if leftPrimary != rightPrimary { return leftPrimary < rightPrimary }
-                return lhs.proximity < rhs.proximity
+                if abs(lhs.proximity - rhs.proximity) > Tuning.centreTieBand {
+                    return lhs.proximity < rhs.proximity
+                }
+                return depthKey(lhs) < depthKey(rhs)
             }
-            // Whether `challenger` is *clearly* nearer than `incumbent` — by depth (relative margin
-            // with an absolute floor) or, when depths are ~equal, by center-proximity.
-            func isClearlyNearer(
+            // Whether `challenger` *clearly* beats `incumbent`: clearly more centered, or — when the
+            // two are comparably centered — clearly nearer in depth.
+            func isClearlyBetter(
                 _ challenger: Candidate,
                 than incumbent: Candidate
             ) -> Bool {
-                let gap = primary(incumbent) - primary(challenger)
-                let threshold = max(
-                    Tuning.switchDepthFloor,
-                    primary(incumbent) * Tuning.switchDepthFraction
+                let proximityGap = incumbent.proximity - challenger.proximity
+                let proximityThreshold = max(
+                    Tuning.switchProximityFloor,
+                    incumbent.proximity * Tuning.switchProximityFraction
                 )
-                if gap >= threshold { return true }
-                if abs(gap) <= threshold {
-                    return challenger.proximity <= incumbent.proximity * (1 - Tuning.switchProximityFraction)
+                if proximityGap >= proximityThreshold { return true }
+                if abs(proximityGap) <= Tuning.centreTieBand {
+                    let depthGap = depthKey(incumbent) - depthKey(challenger)
+                    let depthThreshold = max(
+                        Tuning.switchDepthFloor,
+                        depthKey(incumbent) * Tuning.switchDepthFraction
+                    )
+                    return depthGap >= depthThreshold
                 }
                 return false
             }
@@ -363,14 +378,16 @@
 
             guard let current = continuation(in: candidates) else {
                 // Tracked object absent this frame. Hold only if it's worth waiting for — i.e. the
-                // best available alternative is farther/worse than what we were tracking.
-                let lastPrimary =
+                // best available alternative is less centered (or comparably centered but farther)
+                // than what we were tracking.
+                let lastDepthKey =
                     lastTargetDepth ?? (penaltyBase.map { $0 + Tuning.depthlessPenalty } ?? 0)
-                let bestPrimary = primary(best)
-                let trackedWasNearer =
-                    bestPrimary > lastPrimary
-                    || (bestPrimary == lastPrimary && best.proximity > lastTargetProximity)
-                if withinHold(now), trackedWasNearer {
+                let bestDepthKey = depthKey(best)
+                let trackedWasBetter =
+                    best.proximity > lastTargetProximity + Tuning.centreTieBand
+                    || (abs(best.proximity - lastTargetProximity) <= Tuning.centreTieBand
+                        && bestDepthKey > lastDepthKey)
+                if withinHold(now), trackedWasBetter {
                     return .hold
                 }
                 return .show(best, isSwitch: true)
@@ -387,7 +404,7 @@
             // near it measures: most of those are false positives that will be gone in two
             // frames, and handing them the dot is what made it flicker.
             let isOldEnoughToSteal = best.trackedSeconds >= Tuning.minimumAgeToSteal
-            if isDifferentObject, isOldEnoughToSteal, isClearlyNearer(best, than: current) {
+            if isDifferentObject, isOldEnoughToSteal, isClearlyBetter(best, than: current) {
                 return .show(best, isSwitch: true)
             }
             return .show(current, isSwitch: false)

@@ -33,7 +33,8 @@ extension ObjectDetectionClient {
         startDetection: { _ in },
         stopDetection: { },
         detectionResults: { AsyncStream { _ in } },
-        detectInImage: { _ in DetectionResult() }
+        detectInImage: { _ in DetectionResult() },
+        segmentInImage: { _ in SegmentationResult() }
     )
 
     /// Returns realistic mock data with delays.
@@ -77,6 +78,21 @@ extension ObjectDetectionClient {
                     ),
                 ],
                 inferenceTimeMs: 42.0,
+                timestamp: .now
+            )
+        },
+        segmentInImage: { _ in
+            try await Task.sleep(nanoseconds: MockConstants.inferenceDelayNanoseconds)
+            return SegmentationResult(
+                objects: [
+                    SegmentedObject(
+                        label: "cat",
+                        confidence: 0.95,
+                        boundingBox: BoundingBox(x: 0.2, y: 0.3, width: 0.4, height: 0.5),
+                        cutoutPNG: Data()
+                    ),
+                ],
+                inferenceTimeMs: 48.0,
                 timestamp: .now
             )
         }
@@ -131,7 +147,8 @@ extension ObjectDetectionClient {
                     }
                 }
             },
-            detectInImage: { _ in DetectionResult() }
+            detectInImage: { _ in DetectionResult() },
+            segmentInImage: { _ in SegmentationResult() }
         )
     }
 
@@ -145,6 +162,9 @@ extension ObjectDetectionClient {
         detectionResults: { AsyncStream { $0.finish() } },
         detectInImage: { _ in
             throw ObjectDetectionClient.Error.inferenceFailed("Mock inference failure")
+        },
+        segmentInImage: { _ in
+            throw ObjectDetectionClient.Error.inferenceFailed("Mock segmentation failure")
         }
     )
 }

@@ -9,7 +9,7 @@ import Vision
 import os
 
 #if canImport(UIKit)
-    import UIKit
+import UIKit
 #endif
 
 /// Actor that manages YOLO model lifecycle and runs inference on camera frames.
@@ -38,6 +38,17 @@ actor ObjectDetectionClientActor {
     /// Previous processed frame, registered against the current one to estimate camera motion.
     private var previousFrameWrapper: PhotoCaptureClient.PixelBufferWrapper?
 
+    /// Monocular depth fallback for devices with no hardware depth sensor. The estimate refreshes
+    /// in the background every `Self.monocularDepthInterval` frames and is cached here between
+    /// refreshes; nil until the first estimate lands (ranking falls back to centre-proximity until
+    /// then). Never touched on a device that delivers hardware depth — the model stays unloaded.
+    private let depthEstimator = DepthEstimator()
+    private var monocularDepth: CVPixelBuffer?
+    private var monocularDepthFrameCounter = 0
+    /// Refresh the monocular estimate every Nth processed frame — a second full-frame inference, too
+    /// costly to run every frame, and depth ranking tolerates a few frames of staleness.
+    private static let monocularDepthInterval = 3
+
     /// Thread-safe mode accessible from any isolation domain.
     private let modeStorage = OSAllocatedUnfairLock(initialState: ObjectDetectionClient.DetectionMode.manual)
 
@@ -49,7 +60,7 @@ actor ObjectDetectionClientActor {
     init(
         logger: @escaping @Sendable (String) -> Void = { message in
             #if DEBUG
-                print("[OBJECT_DETECTION]: \(message)")
+            print("[OBJECT_DETECTION]: \(message)")
             #endif
         }
     ) {
@@ -84,31 +95,7 @@ actor ObjectDetectionClientActor {
             mlModel = try MLModel(contentsOf: compiledURL, configuration: config)
         }
 
-        // Extract class labels from model metadata
-        var extractedLabels: [String] = []
-        if let userDefined = mlModel.modelDescription
-            .metadata[MLModelMetadataKey.creatorDefinedKey] as? [String: String]
-        {
-            if let labelsData = userDefined["classes"] {
-                extractedLabels = labelsData.components(separatedBy: ",")
-            } else if let labelsData = userDefined["names"] {
-                // Parse dictionary format: {0: 'person', 1: 'bicycle', ...}
-                let cleaned =
-                    labelsData
-                    .replacingOccurrences(of: "{", with: "")
-                    .replacingOccurrences(of: "}", with: "")
-                let pairs = cleaned.components(separatedBy: ",")
-                for pair in pairs {
-                    let parts = pair.components(separatedBy: ":")
-                    if parts.count == 2 {
-                        let label = parts[1]
-                            .trimmingCharacters(in: .whitespaces)
-                            .replacingOccurrences(of: "'", with: "")
-                        extractedLabels.append(label)
-                    }
-                }
-            }
-        }
+        let extractedLabels = ModelLabels.parse(mlModel)
 
         let vnModel = try VNCoreMLModel(for: mlModel)
 
@@ -189,6 +176,8 @@ actor ObjectDetectionClientActor {
         motionEstimator = nil
         lastFrameTimestamp = nil
         previousFrameWrapper = nil
+        monocularDepth = nil
+        monocularDepthFrameCounter = 0
         croppedTrackIDs.removeAll()
 
         for continuation in resultContinuations.values {
@@ -204,12 +193,16 @@ actor ObjectDetectionClientActor {
         guard let configuration else { return }
         guard let motionEstimator else { return }
 
+        refreshMonocularDepthIfNeeded(for: wrapper)
+        let effectiveDepth = (wrapper.depthBuffer ?? monocularDepth).map(DepthMap.init)
+
         let raw = await runInference(
             wrapper: wrapper,
             previousWrapper: previousFrameWrapper,
             vnModel: vnModel,
             configuration: configuration,
-            motionEstimator: motionEstimator
+            motionEstimator: motionEstimator,
+            depthBuffer: effectiveDepth
         )
         guard let raw else { return }
 
@@ -247,20 +240,25 @@ actor ObjectDetectionClientActor {
             dwellSeconds: configuration.dwellSeconds
         )
 
-        #if DEBUG
-            if !objects.isEmpty {
-                let summary = objects.map { object in
-                    let depthText = object.depth.map { String(format: "%.2fm", $0) } ?? "nil"
-                    return "\(object.label)=\(depthText)"
-                }
-                .joined(separator: " ")
-                let nearest =
-                    objects
-                    .compactMap { object in object.depth.map { (object.label, $0) } }
-                    .min { $0.1 < $1.1 }?.0 ?? "—"
-                print("[DEPTH] \(summary) → nearest \(nearest)")
+        if !objects.isEmpty {
+            let source =
+                wrapper.depthBuffer != nil
+                ? "hardware" : (monocularDepth != nil ? "monocular" : "none")
+            let summary = objects.map { object in
+                let box = object.boundingBox
+                let geometry = String(
+                    format: "c=%.2f,%.2f wh=%.2fx%.2f",
+                    box.x + box.width * 0.5, box.y + box.height * 0.5, box.width, box.height)
+                let depthText = object.depth.map { String(format: "%.3f", $0) } ?? "nil"
+                return "\(object.label)[conf=\(String(format: "%.2f", object.confidence)) \(geometry) d=\(depthText)]"
             }
-        #endif
+            .joined(separator: " ")
+            let nearest =
+                objects
+                .compactMap { object in object.depth.map { (object.label, $0) } }
+                .min { $0.1 < $1.1 }?.0 ?? "—"
+            DiagnosticLog.shared.log("DEPTH src=\(source) \(summary) → nearest=\(nearest)")
+        }
 
         yieldResult(
             ObjectDetectionClient.DetectionResult(
@@ -363,6 +361,21 @@ actor ObjectDetectionClientActor {
     /// the full-resolution image a scan would want.
     private static let cropMaxDimension: CGFloat = 360
 
+    /// Starts a background monocular-depth refresh when the device delivers no hardware depth and the
+    /// cadence is due. Non-blocking: the current frame samples whatever estimate is already cached
+    /// (centre-proximity until the first lands), and the result updates `monocularDepth` for later
+    /// frames. On a device with hardware depth this returns at once and never loads the depth model.
+    private func refreshMonocularDepthIfNeeded(for wrapper: PhotoCaptureClient.PixelBufferWrapper) {
+        guard wrapper.depthBuffer == nil else { return }
+        monocularDepthFrameCounter += 1
+        let due = monocularDepth == nil || monocularDepthFrameCounter % Self.monocularDepthInterval == 0
+        guard due else { return }
+        Task {
+            let estimate = await depthEstimator.estimate(wrapper)
+            monocularDepth = estimate?.buffer ?? monocularDepth
+        }
+    }
+
     /// Run YOLO inference for one frame off the actor (on `inferenceQueue`), sampling per-box depth and
     /// estimating camera motion versus the previous frame. Returns `nil` on non-iOS or a Vision failure.
     private func runInference(
@@ -370,75 +383,77 @@ actor ObjectDetectionClientActor {
         previousWrapper: PhotoCaptureClient.PixelBufferWrapper?,
         vnModel: VNCoreMLModel,
         configuration: ObjectDetectionClient.Configuration,
-        motionEstimator: CameraMotionEstimator
+        motionEstimator: CameraMotionEstimator,
+        depthBuffer: DepthMap?
     ) async -> (detections: [Detection], inferenceMs: Double, cameraMotion: CameraMotion)? {
         await withCheckedContinuation { continuation in
             inferenceQueue.async {
                 let start = CFAbsoluteTimeGetCurrent()
 
                 #if canImport(UIKit)
-                    let request = VNCoreMLRequest(model: vnModel)
-                    request.imageCropAndScaleOption = .scaleFill
+                let request = VNCoreMLRequest(model: vnModel)
+                request.imageCropAndScaleOption = .scaleFill
 
-                    // Use CVPixelBuffer directly — avoids CIImage allocation per frame.
-                    let handler = VNImageRequestHandler(cvPixelBuffer: wrapper.pixelBuffer, options: [:])
-                    do {
-                        try handler.perform([request])
-                    } catch {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-
-                    let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
-                    var detections: [Detection] = []
-
-                    if let results = request.results as? [VNRecognizedObjectObservation] {
-                        for prediction in results.prefix(configuration.maxDetections) {
-                            let conf = prediction.labels[0].confidence
-                            guard conf >= configuration.confidenceThreshold else { continue }
-
-                            let visionBox = prediction.boundingBox
-                            // Vision uses bottom-left origin → convert to top-left.
-                            let box = TrackBox(
-                                x: Float(visionBox.minX),
-                                y: Float(1 - visionBox.maxY),
-                                width: Float(visionBox.width),
-                                height: Float(visionBox.height)
-                            )
-
-                            // Sample true Z depth at the box centre (nil on non-depth devices).
-                            let depth = DepthSampler.sample(
-                                in: wrapper.depthBuffer,
-                                centerX: box.x + box.width * 0.5,
-                                centerY: box.y + box.height * 0.5,
-                                boxWidth: box.width,
-                                boxHeight: box.height
-                            )
-
-                            detections.append(
-                                Detection(
-                                    box: box,
-                                    confidence: conf,
-                                    label: prediction.labels[0].identifier,
-                                    depth: depth
-                                )
-                            )
-                        }
-                    }
-
-                    // Estimate global camera motion (previous → current) for CMC — identity on the
-                    // first frame or when registration fails.
-                    let cameraMotion =
-                        previousWrapper.map {
-                            motionEstimator.estimate(
-                                previous: $0.pixelBuffer,
-                                current: wrapper.pixelBuffer
-                            )
-                        } ?? .identity
-
-                    continuation.resume(returning: (detections, inferenceTime, cameraMotion))
-                #else
+                // Use CVPixelBuffer directly — avoids CIImage allocation per frame.
+                let handler = VNImageRequestHandler(cvPixelBuffer: wrapper.pixelBuffer, options: [:])
+                do {
+                    try handler.perform([request])
+                } catch {
                     continuation.resume(returning: nil)
+                    return
+                }
+
+                let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
+                var detections: [Detection] = []
+
+                if let results = request.results as? [VNRecognizedObjectObservation] {
+                    for prediction in results.prefix(configuration.maxDetections) {
+                        let conf = prediction.labels[0].confidence
+                        guard conf >= configuration.confidenceThreshold else { continue }
+
+                        let visionBox = prediction.boundingBox
+                        // Vision uses bottom-left origin → convert to top-left.
+                        let box = TrackBox(
+                            x: Float(visionBox.minX),
+                            y: Float(1 - visionBox.maxY),
+                            width: Float(visionBox.width),
+                            height: Float(visionBox.height)
+                        )
+
+                        // Sample Z depth at the box centre from hardware depth, or the monocular
+                        // fallback on devices without a depth sensor (nil until the first estimate).
+                        let depth = DepthSampler.sample(
+                            in: depthBuffer?.buffer,
+                            centerX: box.x + box.width * 0.5,
+                            centerY: box.y + box.height * 0.5,
+                            boxWidth: box.width,
+                            boxHeight: box.height
+                        )
+
+                        detections.append(
+                            Detection(
+                                box: box,
+                                confidence: conf,
+                                label: prediction.labels[0].identifier,
+                                depth: depth
+                            )
+                        )
+                    }
+                }
+
+                // Estimate global camera motion (previous → current) for CMC — identity on the
+                // first frame or when registration fails.
+                let cameraMotion =
+                    previousWrapper.map {
+                        motionEstimator.estimate(
+                            previous: $0.pixelBuffer,
+                            current: wrapper.pixelBuffer
+                        )
+                    } ?? .identity
+
+                continuation.resume(returning: (detections, inferenceTime, cameraMotion))
+                #else
+                continuation.resume(returning: nil)
                 #endif
             }
         }
@@ -448,83 +463,83 @@ actor ObjectDetectionClientActor {
 
     func detectInImage(_ imageData: Data) async throws -> ObjectDetectionClient.DetectionResult {
         #if canImport(UIKit)
-            let activeModel: VNCoreMLModel
-            let activeLabels: [String]
+        let activeModel: VNCoreMLModel
+        let activeLabels: [String]
 
-            if let existing = vnModel {
-                activeModel = existing
-                activeLabels = labels
-            } else {
-                let modelName = configuration?.modelName ?? "yolo11n"
-                guard let modelURL = bundledModelURL(name: modelName) else {
-                    throw ObjectDetectionClient.Error.modelLoadFailed(
-                        "Bundled model '\(modelName)' not found in resources"
+        if let existing = vnModel {
+            activeModel = existing
+            activeLabels = labels
+        } else {
+            let modelName = configuration?.modelName ?? "yolo26n"
+            guard let modelURL = bundledModelURL(name: modelName) else {
+                throw ObjectDetectionClient.Error.modelLoadFailed(
+                    "Bundled model '\(modelName)' not found in resources"
+                )
+            }
+            let (loaded, loadedLabels) = try loadModel(from: modelURL)
+            activeModel = loaded
+            activeLabels = loadedLabels
+        }
+
+        guard let uiImage = UIImage(data: imageData) else {
+            throw ObjectDetectionClient.Error.inferenceFailed("Invalid image data")
+        }
+
+        // Bake orientation into pixel data so Vision sees the same
+        // orientation that cropImage will use later
+        let renderer = UIGraphicsImageRenderer(size: uiImage.size)
+        let orientedImage = renderer.image { _ in
+            uiImage.draw(in: CGRect(origin: .zero, size: uiImage.size))
+        }
+        guard let cgImage = orientedImage.cgImage else {
+            throw ObjectDetectionClient.Error.inferenceFailed("Failed to render oriented image")
+        }
+
+        let request = VNCoreMLRequest(model: activeModel)
+        request.imageCropAndScaleOption = .scaleFill
+
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        let start = CFAbsoluteTimeGetCurrent()
+        try handler.perform([request])
+        let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
+        let config = configuration ?? .default
+
+        var detectedObjects: [ObjectDetectionClient.DetectedObject] = []
+
+        if let results = request.results as? [VNRecognizedObjectObservation] {
+            for prediction in results.prefix(config.maxDetections) {
+                let conf = prediction.labels[0].confidence
+                // Single still has no tracker — filter by the high threshold so the picker only
+                // shows confident objects (the live floor is intentionally low for ByteTrack).
+                guard conf >= config.highConfidenceThreshold else { continue }
+
+                let visionBox = prediction.boundingBox
+                // Vision uses bottom-left origin → convert to top-left
+                let boundingBox = ObjectDetectionClient.BoundingBox(
+                    x: Float(visionBox.minX),
+                    y: Float(1 - visionBox.maxY),
+                    width: Float(visionBox.width),
+                    height: Float(visionBox.height)
+                )
+
+                let label = prediction.labels[0].identifier
+                detectedObjects.append(
+                    ObjectDetectionClient.DetectedObject(
+                        label: label,
+                        confidence: conf,
+                        boundingBox: boundingBox
                     )
-                }
-                let (loaded, loadedLabels) = try loadModel(from: modelURL)
-                activeModel = loaded
-                activeLabels = loadedLabels
+                )
             }
+        }
 
-            guard let uiImage = UIImage(data: imageData) else {
-                throw ObjectDetectionClient.Error.inferenceFailed("Invalid image data")
-            }
-
-            // Bake orientation into pixel data so Vision sees the same
-            // orientation that cropImage will use later
-            let renderer = UIGraphicsImageRenderer(size: uiImage.size)
-            let orientedImage = renderer.image { _ in
-                uiImage.draw(in: CGRect(origin: .zero, size: uiImage.size))
-            }
-            guard let cgImage = orientedImage.cgImage else {
-                throw ObjectDetectionClient.Error.inferenceFailed("Failed to render oriented image")
-            }
-
-            let request = VNCoreMLRequest(model: activeModel)
-            request.imageCropAndScaleOption = .scaleFill
-
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            let start = CFAbsoluteTimeGetCurrent()
-            try handler.perform([request])
-            let inferenceTime = (CFAbsoluteTimeGetCurrent() - start) * 1000
-            let config = configuration ?? .default
-
-            var detectedObjects: [ObjectDetectionClient.DetectedObject] = []
-
-            if let results = request.results as? [VNRecognizedObjectObservation] {
-                for prediction in results.prefix(config.maxDetections) {
-                    let conf = prediction.labels[0].confidence
-                    // Single still has no tracker — filter by the high threshold so the picker only
-                    // shows confident objects (the live floor is intentionally low for ByteTrack).
-                    guard conf >= config.highConfidenceThreshold else { continue }
-
-                    let visionBox = prediction.boundingBox
-                    // Vision uses bottom-left origin → convert to top-left
-                    let boundingBox = ObjectDetectionClient.BoundingBox(
-                        x: Float(visionBox.minX),
-                        y: Float(1 - visionBox.maxY),
-                        width: Float(visionBox.width),
-                        height: Float(visionBox.height)
-                    )
-
-                    let label = prediction.labels[0].identifier
-                    detectedObjects.append(
-                        ObjectDetectionClient.DetectedObject(
-                            label: label,
-                            confidence: conf,
-                            boundingBox: boundingBox
-                        )
-                    )
-                }
-            }
-
-            return ObjectDetectionClient.DetectionResult(
-                objects: detectedObjects,
-                inferenceTimeMs: inferenceTime,
-                timestamp: .now
-            )
+        return ObjectDetectionClient.DetectionResult(
+            objects: detectedObjects,
+            inferenceTimeMs: inferenceTime,
+            timestamp: .now
+        )
         #else
-            throw ObjectDetectionClient.Error.inferenceFailed("Object detection requires iOS")
+        throw ObjectDetectionClient.Error.inferenceFailed("Object detection requires iOS")
         #endif
     }
 

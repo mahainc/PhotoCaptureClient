@@ -1,5 +1,6 @@
 import Dependencies
 import XCTest
+
 @testable import ObjectDetectionClient
 
 final class ObjectDetectionClientTests: XCTestCase {
@@ -82,7 +83,7 @@ final class ObjectDetectionClientTests: XCTestCase {
 
     func testConfigurationConvenience() {
         let defaultConfig = ObjectDetectionClient.Configuration.default
-        XCTAssertEqual(defaultConfig.modelName, "yolo11n")
+        XCTAssertEqual(defaultConfig.modelName, "yolo26n")
         XCTAssertEqual(defaultConfig.confidenceThreshold, 0.25)
         XCTAssertEqual(defaultConfig.maxDetections, 10)
         XCTAssertNil(defaultConfig.dwellSeconds, "dwell cropping is opt-in")
