@@ -102,8 +102,6 @@ actor DepthEstimator {
         guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
         let destinationBytesPerRow = CVPixelBufferGetBytesPerRow(buffer)
 
-        var minValue = Float.greatestFiniteMagnitude
-        var maxValue = -Float.greatestFiniteMagnitude
         array.withUnsafeBufferPointer(ofType: Float.self) { source in
             guard let sourceBase = source.baseAddress else { return }
             for row in 0..<height {
@@ -111,14 +109,7 @@ actor DepthEstimator {
                     .assumingMemoryBound(to: Float.self)
                 destinationRow.update(from: sourceBase.advanced(by: row * width), count: width)
             }
-            for index in 0..<(width * height) {
-                let value = sourceBase[index]
-                if value < minValue { minValue = value }
-                if value > maxValue { maxValue = value }
-            }
         }
-        DiagnosticLog.shared.log(
-            String(format: "MONO depth %dx%d min=%.3f max=%.3f", width, height, minValue, maxValue))
         return buffer
     }
 }

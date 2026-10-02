@@ -19,9 +19,11 @@ final class DiagnosticLog: @unchecked Sendable {
     }
 
     func log(_ message: String) {
+        // Logging is a debug-only concern: a shipped build does no printing and no file I/O, so this
+        // whole body compiles out of release. The on-device file lets a `devicectl`-launched debug
+        // session be pulled back and inspected, where plain `print` does not survive.
         #if DEBUG
-            print("[YOLO] \(message)")
-        #endif
+        print("[YOLO] \(message)")
         guard let fileURL else { return }
         let line = "\(formatter.string(from: Date())) \(message)\n"
         lock.lock()
@@ -34,5 +36,6 @@ final class DiagnosticLog: @unchecked Sendable {
         } else {
             try? data.write(to: fileURL)
         }
+        #endif
     }
 }

@@ -240,6 +240,10 @@ actor ObjectDetectionClientActor {
             dwellSeconds: configuration.dwellSeconds
         )
 
+        #if DEBUG
+        // Per-frame depth diagnostic: builds a summary string and writes to the on-device log, so it
+        // stays out of release builds — the string formatting and file I/O are hot-path work at the
+        // detection cadence, not something a shipped app should pay for.
         if !objects.isEmpty {
             let source =
                 wrapper.depthBuffer != nil
@@ -259,6 +263,7 @@ actor ObjectDetectionClientActor {
                 .min { $0.1 < $1.1 }?.0 ?? "—"
             DiagnosticLog.shared.log("DEPTH src=\(source) \(summary) → nearest=\(nearest)")
         }
+        #endif
 
         yieldResult(
             ObjectDetectionClient.DetectionResult(

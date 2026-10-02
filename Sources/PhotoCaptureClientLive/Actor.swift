@@ -79,6 +79,13 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
     private let frameIntervalSeconds: CFTimeInterval = 0.333
     private var lastFrameTime: CFTimeInterval = 0
 
+    // Depth maps are converted to Float32 and reoriented on the CPU in every callback, but the
+    // sampler reads depth only when a throttled video frame is delivered. Processing all ~30fps was
+    // ~10× the work anything downstream consumed, and a measurable share of the thermal load. Gate
+    // depth to the detection cadence; a centre-tie breaker tolerates ≤ one interval of staleness.
+    // Written and read only on depthDataQueue (serial), so it needs no lock.
+    private var lastDepthTime: CFTimeInterval = 0
+
     // Metal renderer callback — receives every frame at full camera rate (no throttling)
     var onFrame: ((_ pixelBuffer: CVPixelBuffer) -> Void)?
 
@@ -323,7 +330,11 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         let output = AVCaptureDepthDataOutput()
         guard session.canAddOutput(output) else { return nil }
         session.addOutput(output)
-        output.isFilteringEnabled = true
+        // Ranking reads a 20th-percentile sample over a box and uses it only to break a centre tie,
+        // so it does not need temporal/spatial hole-filling — and filtering is continuous depth-
+        // pipeline work. Off trades a little sparsity (holes fall back to centre ranking, which is
+        // the primary criterion anyway) for a steady thermal saving.
+        output.isFilteringEnabled = false
         output.setDelegate(self, callbackQueue: depthDataQueue)
         depthDataOutput = output
         return output
@@ -670,6 +681,12 @@ extension PhotoCaptureDelegate: AVCaptureDepthDataOutputDelegate {
         timestamp: CMTime,
         connection: AVCaptureConnection
     ) {
+        // Throttle to the detection cadence: the conversion + EXIF reorientation below are per-frame
+        // CPU work, and nothing samples depth faster than video frames are throttled through.
+        let now = CACurrentMediaTime()
+        guard now - lastDepthTime >= frameIntervalSeconds else { return }
+        lastDepthTime = now
+
         // Normalise to metric depth (metres, smaller = nearer). LiDAR/dual cameras may deliver
         // disparity or 16-bit depth; converting to DepthFloat32 guarantees comparable metres and a
         // fresh, non-pool backing buffer that is safe to retain past this callback (the wrapper's
