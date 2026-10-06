@@ -1,0 +1,86 @@
+{
+  "project": "PhotoCaptureClient",
+  "schema_version": "1.0",
+  "generated_by": "harness-init 1.5",
+  "last_updated": "2026-10-06",
+  "rules": {
+    "single_active_feature": true,
+    "passing_requires_evidence": true,
+    "do_not_skip_verification": true
+  },
+  "status_legend": {
+    "not_started": "Work has not begun.",
+    "in_progress": "The feature is the current active task.",
+    "blocked": "Work cannot continue until a documented blocker is resolved.",
+    "passing": "Required verification has passed and evidence is recorded."
+  },
+  "entry_shape": {
+    "id": "area-NNN",
+    "priority": "integer, 1 is highest",
+    "area": "grouping key",
+    "title": "short name",
+    "user_visible_behavior": "what a user can observe when this works",
+    "status": "one of status_legend",
+    "dependencies": ["ids of features that must be passing before this one can start"],
+    "verification": ["concrete, runnable or observable steps"],
+    "evidence": ["command output, commit sha, screenshot path"],
+    "notes": "granularity rule: one feature must be finishable in one session"
+  },
+  "features": [
+    {
+      "id": "preview-001",
+      "priority": 1,
+      "area": "preview",
+      "title": "Metal camera preview",
+      "user_visible_behavior": "Live camera preview renders at full camera rate (30/60fps), aspect-fill without stretching, independent of YOLO; detection boxes and the center dot overlay draw on top.",
+      "status": "passing",
+      "dependencies": [],
+      "verification": [
+        "xcode-build biên dịch sạch",
+        "smoke preview thủ công trên thiết bị: preview mượt full-rate, không phụ thuộc inference"
+      ],
+      "evidence": [
+        "Sources/PhotoCaptureClientLive/MetalPreviewRenderer.swift",
+        "Sources/PhotoCaptureClientLive/Shaders.metal",
+        "docs/ARCHITECTURE.md §2 — flow camera hai nhịp (preview full-rate, zero-copy CVMetalTextureCache)"
+      ],
+      "notes": "Migrate từ docs/superpowers/plans/2026-03-19-metal-camera-preview.md (plan đã hoàn thành). Thay AVCaptureVideoPreviewLayer bằng MTKView-driven renderer + overlay vertex buffer tái dùng."
+    },
+    {
+      "id": "detection-001",
+      "priority": 1,
+      "area": "detection",
+      "title": "YOLO26 detect + tracking + depth + segmentation",
+      "user_visible_behavior": "Nhận diện/bám vật thể với ID ổn định (coast qua dropout), center-dot center-first, độ sâu ưu tiên cảm biến phần cứng (fallback monocular), và cutout tách nền trên ảnh tĩnh sau khi chụp.",
+      "status": "passing",
+      "dependencies": ["preview-001"],
+      "verification": [
+        "xcode-build biên dịch sạch",
+        "swift-test: ObjectTrackingTests + ObjectDetectionClientTests pass"
+      ],
+      "evidence": [
+        "commit 3573e21 — YOLO26 models: detect upgrade, segmentation, monocular depth, center-first dot",
+        "commit 0bad36e — throttle hardware depth, gate diagnostics to DEBUG",
+        "docs/ARCHITECTURE.md §3–§7",
+        "Sources/ObjectDetectionClient, Sources/ObjectDetectionClientLive, Sources/ObjectTracking"
+      ],
+      "notes": "Migrate từ docs/superpowers/plans/2026-03-19-yolo-object-detection-integration.md (plan đã hoàn thành; YOLO11n → YOLO26n). ObjectTracking giữ clean-room, không code AGPL — xem Sources/ObjectTracking/Attribution.swift."
+    },
+    {
+      "id": "gestures-001",
+      "priority": 2,
+      "area": "gestures",
+      "title": "Pinch-to-zoom + tap-to-focus gestures trên preview",
+      "user_visible_behavior": "Pinch trên preview để zoom (clamp min/max), tap để focus + auto-expose tại điểm chạm; đổi camera reset zoom về 1.0. Không đổi public API.",
+      "status": "not_started",
+      "dependencies": ["preview-001"],
+      "verification": [
+        "Tap gần từng góc — focus theo đúng điểm kỳ vọng (mapping aspect-fill + xoay 90°)",
+        "Pinch in/out — zoom mượt và clamp ở min/max",
+        "Đổi camera — zoom reset 1.0 và vẫn hoạt động"
+      ],
+      "evidence": [],
+      "notes": "Design đầy đủ ở docs/zoom-focus-gestures-design.md. API lập trình (setZoomFactor/setVisualZoom/focus) đã có trong Sources/PhotoCaptureClient/Interface.swift; còn thiếu wire UIPinchGestureRecognizer/UITapGestureRecognizer + callback onTapToFocus/onZoomChange trong MetalPreviewRenderer.swift và Actor.swift."
+    }
+  ]
+}
