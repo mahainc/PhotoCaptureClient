@@ -20,8 +20,9 @@
      deleted only when a verification run proves it fixed -- never because it stopped
      being mentioned. Anything here that blocks work is also named on Blockers above. -->
 
-- Chưa tag v0.4.0 + push PhotoCaptureClient (còn treo để phát hành).
-- App tiêu thụ (Lensy) `Features/Package.swift` đang local-path override tạm → cần đổi về `from: "0.4.0"` sau khi tag.
+- v0.5.0 đã tag (annotated, trỏ 3b2fdb9) + push + GitHub Release (Latest) 2026-10-06. BÀI HỌC: publish = tag + release ĐI CÙNG NHAU. Các tag v0.2.1/v0.3.0/v0.3.1/v0.4.0 vẫn là tag-trần thiếu GitHub Release (GH release mới có v0.1.0/v0.2.0/v0.5.0) — bổ sung nếu cần.
+- gestures-001 + drop-macOS (commit a7263ff, 79e0aa6 trên dev) nằm SAU v0.5.0 → dành cho 0.6.0 (sau khi gestures validate trên device).
+- App tiêu thụ (Lensy) `Features/Package.swift` đang local-path override tạm → cần đổi về `from: "0.5.0"` sau khi đã release.
 - clean-code gate đang hoãn tới bước tích hợp.
 - Cần trim `DiagnosticLog` + bỏ log DEPTH verbose trước bản release thật.
 - Gói nay là **iOS-only** (đã bỏ `.macOS` + mọi nhánh macOS/AppKit — xem Decision 2026-10-06). Hệ quả: `swift test` trên host macOS KHÔNG hợp lệ nữa (code iOS-only); SourceKit trong editor (đánh giá theo macOS host) sẽ báo đỏ `AVCaptureDepthDataOutput unavailable in macOS`, `Cannot find 'preferred'/'isRaw'`, `PreviewView has no member 'view'`… — đó là NHIỄU editor theo macOS, KHÔNG phải lỗi iOS. Verification thật = `xcode-build --platform ios` (xanh). Level-2 unit test cần route qua iOS simulator; wrapper `swift-test` hiện không route iOS cho gói SPM thuần (không có scheme) → unit test tự động vẫn chưa chạy được, cần dựng scheme iOS nếu muốn level-2.

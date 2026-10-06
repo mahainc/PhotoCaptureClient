@@ -16,3 +16,4 @@ xcuserdata/
 # Model-export Python virtualenv (see scripts/export-models.sh) and clean-code state
 .venv-export/
 .claude/
+.clean-code/
