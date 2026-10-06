@@ -98,6 +98,23 @@
             initialState: (factor: 1.0, anchorX: 0.5, anchorY: 0.5)
         )
 
+        // MARK: - Gesture State
+
+        /// Emitted on tap — an AVFoundation focus point of interest (landscape-left, 0..1) the actor
+        /// forwards to the capture device. Set on the main thread.
+        var onTapToFocus: ((CGPoint) -> Void)?
+
+        /// Emitted while pinching — a zoom factor already clamped to `zoomLimits`. Set on the main thread.
+        var onZoomChange: ((CGFloat) -> Void)?
+
+        /// The active device's available zoom range, supplied by the actor; pinch factors clamp to it.
+        /// Touched only on the main thread, like the two tracking fields below.
+        var zoomLimits: (min: CGFloat, max: CGFloat) = (1, 1)
+
+        /// The live zoom factor the next pinch resumes from, and the anchor captured when a pinch begins.
+        private var currentZoomFactor: CGFloat = 1
+        private var baseZoomFactor: CGFloat = 1
+
         /// Back-reference to PreviewView for syncing aspect-fill and zoom values to consumers.
         weak var previewViewRef: PhotoCaptureClient.PreviewView?
 
@@ -231,6 +248,10 @@
                 dotOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
             ])
 
+            // Touches must reach this view's gesture recognizers, not the MTKView layered over it.
+            mtkView.isUserInteractionEnabled = false
+            setupGestures()
+
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification,
                 object: nil,
@@ -274,6 +295,75 @@
         /// Reset zoom to default (e.g., on camera switch).
         func resetVisualZoom() {
             setVisualZoom(factor: 1.0, anchorX: 0.5, anchorY: 0.5)
+        }
+
+        // MARK: - Gestures
+
+        /// Install the default pinch-to-zoom and tap-to-focus recognizers on the preview.
+        private func setupGestures() {
+            addGestureRecognizer(
+                UIPinchGestureRecognizer(target: self, action: #selector(handlePinch(_:)))
+            )
+            addGestureRecognizer(
+                UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+            )
+        }
+
+        /// Reset pinch tracking to 1× — called on camera switch, after the new device input has
+        /// already reset its own `videoZoomFactor`.
+        func resetZoomTracking() {
+            currentZoomFactor = 1
+            baseZoomFactor = 1
+        }
+
+        /// Keep pinch tracking in step with a programmatic zoom so the next pinch resumes from the
+        /// live factor instead of jumping.
+        func syncZoomTracking(to factor: CGFloat) {
+            currentZoomFactor = min(max(factor, zoomLimits.min), zoomLimits.max)
+        }
+
+        @objc private func handlePinch(_ gesture: UIPinchGestureRecognizer) {
+            switch gesture.state {
+                case .began:
+                    baseZoomFactor = currentZoomFactor
+                case .changed, .ended:
+                    // `scale` is cumulative since `.began`, so the base is the anchor, not the previous factor.
+                    let proposed = baseZoomFactor * gesture.scale
+                    let clamped = min(max(proposed, zoomLimits.min), zoomLimits.max)
+                    currentZoomFactor = clamped
+                    onZoomChange?(clamped)
+                default:
+                    break
+            }
+        }
+
+        @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+            guard let focusPoint = cameraFocusPoint(forViewPoint: gesture.location(in: self)) else {
+                return
+            }
+            onTapToFocus?(focusPoint)
+        }
+
+        /// Map a tap in view coordinates to an AVFoundation focus point of interest. Runs the same
+        /// zoom-about-anchor then aspect-fill the camera shader uses to turn a screen point into a
+        /// texture coordinate, then the portrait → landscape-left rotation the video connection applies
+        /// (`videoRotationAngle = 90`). `nil` before the view has a non-zero size.
+        private func cameraFocusPoint(forViewPoint point: CGPoint) -> CGPoint? {
+            let size = bounds.size
+            guard size.width > 0, size.height > 0 else { return nil }
+
+            let zoom = _visualZoom.withLock { $0 }
+            let viewU = Float(point.x / size.width)
+            let viewV = Float(point.y / size.height)
+            let zoomedU = (viewU - zoom.anchorX) / zoom.factor + zoom.anchorX
+            let zoomedV = (viewV - zoom.anchorY) / zoom.factor + zoom.anchorY
+            let texU = zoomedU * aspectFillUniforms.uvScale.x + aspectFillUniforms.uvOffset.x
+            let texV = zoomedV * aspectFillUniforms.uvScale.y + aspectFillUniforms.uvOffset.y
+            return CGPoint(x: CGFloat(clampUnit(texV)), y: CGFloat(clampUnit(1 - texU)))
+        }
+
+        private func clampUnit(_ value: Float) -> Float {
+            min(max(value, 0), 1)
         }
 
         // MARK: - Public API

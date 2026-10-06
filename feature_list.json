@@ -3,7 +3,7 @@
   "schema_version": "1.0",
   "generated_by": "harness-init 1.5",
   "last_updated": "2026-10-06",
-  "active_feature": null,
+  "active_feature": "gestures-001",
   "rules": {
     "single_active_feature": true,
     "passing_requires_evidence": true,
@@ -73,15 +73,20 @@
       "area": "gestures",
       "title": "Pinch-to-zoom + tap-to-focus gestures trên preview",
       "user_visible_behavior": "Pinch trên preview để zoom (clamp min/max), tap để focus + auto-expose tại điểm chạm; đổi camera reset zoom về 1.0. Không đổi public API.",
-      "status": "not_started",
+      "status": "in_progress",
       "dependencies": ["preview-001"],
       "verification": [
         "Tap gần từng góc — focus theo đúng điểm kỳ vọng (mapping aspect-fill + xoay 90°)",
         "Pinch in/out — zoom mượt và clamp ở min/max",
         "Đổi camera — zoom reset 1.0 và vẫn hoạt động"
       ],
-      "evidence": [],
-      "notes": "Design đầy đủ ở docs/zoom-focus-gestures-design.md. API lập trình (setZoomFactor/setVisualZoom/focus) đã có trong Sources/PhotoCaptureClient/Interface.swift; còn thiếu wire UIPinchGestureRecognizer/UITapGestureRecognizer + callback onTapToFocus/onZoomChange trong MetalPreviewRenderer.swift và Actor.swift."
+      "evidence": [
+        "xcode-build --scheme PhotoCaptureClient-Package --platform ios: BUILD SUCCEEDED (level 1, 0 lỗi, không cần sửa)",
+        "MetalPreviewRenderer.swift: UIPinchGestureRecognizer + UITapGestureRecognizer (setupGestures), handlePinch (clamp zoomLimits), handleTap→cameraFocusPoint (zoom-anchor + aspect-fill + portrait→landscape-left), callback onTapToFocus/onZoomChange, resetZoomTracking/syncZoomTracking; mtkView.isUserInteractionEnabled=false",
+        "Actor.swift: delegate focusAndExpose(at:) (focus+auto-expose, guard support, non-throwing) + setZoomFactorClamped + zoomLimits(); actor wireGestureCallbacks/applyGestureZoom/applyTapToFocus; switchCamera + setZoomFactor nay sync renderer zoom state",
+        "clean-code check: code mới 0 finding tier-A; các finding tier-B là judgment (G14 device-config nhất quán với file, G14 struct-navigation không phải vi phạm thật, G15 false-positive trên switch gesture.state). clean-code gate: BYPASS (nợ tier-A toàn pre-existing; gate hoãn tới bước tích hợp theo repo decision + tiền lệ detection-002)"
+      ],
+      "notes": "IMPLEMENTATION COMPLETE, compile iOS PASS — chờ manual device validation (level 3: tap/pinch/switch), là verification đã định nghĩa của feature (giống detection-002 cần user xác nhận trên thiết bị). Design ở docs/zoom-focus-gestures-design.md. Pinch lái AVFoundation videoZoomFactor (clamp, không throw), KHÔNG lái visual-zoom shader (giữ 1.0). Không đổi public API. Level 2 swift-test bị chặn bởi gap baseline macOS (xem Known Issues), ngoài scope feature."
     },
     {
       "id": "detection-002",

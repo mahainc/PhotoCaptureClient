@@ -6,10 +6,10 @@ import PhotoCaptureClient
 import os
 
 #if os(iOS)
-import UIKit
-import MetalKit
+    import UIKit
+    import MetalKit
 #else
-import AppKit
+    import AppKit
 #endif
 
 // MARK: - Delegate
@@ -59,8 +59,8 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         set { _depthExifOrientation.withLock { $0 = newValue } }
     }
     #if DEBUG
-    /// One-shot guard so the depth map's orientation/dims are logged once per (re)configuration.
-    private var didLogDepth = false
+        /// One-shot guard so the depth map's orientation/dims are logged once per (re)configuration.
+        private var didLogDepth = false
     #endif
 
     // Thread-safe continuation for frame delivery.
@@ -172,7 +172,7 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         // map stays sensor-native landscape. Keep one source of truth for depth orientation.
         depthExifOrientation = mirror ? .rightMirrored : .right
         #if DEBUG
-        didLogDepth = false
+            didLogDepth = false
         #endif
         let connections: [AVCaptureConnection?] = [
             videoDataOutput?.connection(with: .video),
@@ -195,17 +195,17 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
     /// (LiDAR / dual / TrueDepth) over the plain wide-angle camera.
     private static func bestDevice(position: AVCaptureDevice.Position) -> AVCaptureDevice? {
         #if os(iOS)
-        let preferred: [AVCaptureDevice.DeviceType] =
-            position == .front
-            ? [.builtInTrueDepthCamera, .builtInWideAngleCamera]
-            : [
-                .builtInLiDARDepthCamera,
-                .builtInDualWideCamera,
-                .builtInDualCamera,
-                .builtInWideAngleCamera,
-            ]
+            let preferred: [AVCaptureDevice.DeviceType] =
+                position == .front
+                ? [.builtInTrueDepthCamera, .builtInWideAngleCamera]
+                : [
+                    .builtInLiDARDepthCamera,
+                    .builtInDualWideCamera,
+                    .builtInDualCamera,
+                    .builtInWideAngleCamera,
+                ]
         #else
-        let preferred: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+            let preferred: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
         #endif
         let discovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: preferred,
@@ -447,24 +447,57 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         device.unlockForConfiguration()
     }
 
-    #if os(iOS)
-    func setZoomFactor(_ factor: CGFloat) throws {
-        guard let device = currentDevice else {
-            throw PhotoCaptureClient.Error.captureSessionNotRunning
+    /// Focus **and** auto-expose at a point of interest. The tap gesture drives this, so each axis is
+    /// guarded by device support and simply skipped when unavailable — a tap must never fail — and one
+    /// lock covers both.
+    func focusAndExpose(at point: CGPoint) {
+        guard let device = currentDevice else { return }
+        guard (try? device.lockForConfiguration()) != nil else { return }
+        if device.isFocusPointOfInterestSupported, device.isFocusModeSupported(.autoFocus) {
+            device.focusPointOfInterest = point
+            device.focusMode = .autoFocus
         }
-        let minZoom = device.minAvailableVideoZoomFactor
-        let maxZoom = device.maxAvailableVideoZoomFactor
-        guard factor >= minZoom && factor <= maxZoom else {
-            throw PhotoCaptureClient.Error.zoomFactorOutOfRange(min: minZoom, max: maxZoom)
+        if device.isExposurePointOfInterestSupported, device.isExposureModeSupported(.autoExpose) {
+            device.exposurePointOfInterest = point
+            device.exposureMode = .autoExpose
         }
-        try device.lockForConfiguration()
-        device.videoZoomFactor = factor
         device.unlockForConfiguration()
     }
+
+    #if os(iOS)
+        func setZoomFactor(_ factor: CGFloat) throws {
+            guard let device = currentDevice else {
+                throw PhotoCaptureClient.Error.captureSessionNotRunning
+            }
+            let minZoom = device.minAvailableVideoZoomFactor
+            let maxZoom = device.maxAvailableVideoZoomFactor
+            guard factor >= minZoom && factor <= maxZoom else {
+                throw PhotoCaptureClient.Error.zoomFactorOutOfRange(min: minZoom, max: maxZoom)
+            }
+            try device.lockForConfiguration()
+            device.videoZoomFactor = factor
+            device.unlockForConfiguration()
+        }
+
+        /// Set zoom, clamping to the device's available range instead of throwing — the pinch gesture
+        /// drives this and must not fail at the limits.
+        func setZoomFactorClamped(_ factor: CGFloat) {
+            guard let device = currentDevice else { return }
+            guard (try? device.lockForConfiguration()) != nil else { return }
+            let clamped = min(max(factor, device.minAvailableVideoZoomFactor), device.maxAvailableVideoZoomFactor)
+            device.videoZoomFactor = clamped
+            device.unlockForConfiguration()
+        }
+
+        /// The active device's available zoom range, supplied to the renderer so pinch clamps locally.
+        func zoomLimits() -> (min: CGFloat, max: CGFloat) {
+            guard let device = currentDevice else { return (1, 1) }
+            return (device.minAvailableVideoZoomFactor, device.maxAvailableVideoZoomFactor)
+        }
     #else
-    func setZoomFactor(_ factor: CGFloat) throws {
-        throw PhotoCaptureClient.Error.cameraUnavailable
-    }
+        func setZoomFactor(_ factor: CGFloat) throws {
+            throw PhotoCaptureClient.Error.cameraUnavailable
+        }
     #endif
 
     func teardown() {
@@ -510,18 +543,18 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
             object: captureSession
         )
         #if os(iOS)
-        nc.addObserver(
-            self,
-            selector: #selector(sessionWasInterrupted),
-            name: .AVCaptureSessionWasInterrupted,
-            object: captureSession
-        )
-        nc.addObserver(
-            self,
-            selector: #selector(sessionInterruptionEnded),
-            name: .AVCaptureSessionInterruptionEnded,
-            object: captureSession
-        )
+            nc.addObserver(
+                self,
+                selector: #selector(sessionWasInterrupted),
+                name: .AVCaptureSessionWasInterrupted,
+                object: captureSession
+            )
+            nc.addObserver(
+                self,
+                selector: #selector(sessionInterruptionEnded),
+                name: .AVCaptureSessionInterruptionEnded,
+                object: captureSession
+            )
         #endif
     }
 
@@ -538,24 +571,24 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
     }
 
     #if os(iOS)
-    @objc private func sessionWasInterrupted(_ notification: Notification) {
-        // Don't sample a frozen depth map while interrupted; it resumes when depth frames flow.
-        latestDepthMap = nil
-        let reason: PhotoCaptureClient.InterruptionReason
-        if let userInfo = notification.userInfo,
-            let rawReason = userInfo[AVCaptureSessionInterruptionReasonKey] as? Int,
-            let avReason = AVCaptureSession.InterruptionReason(rawValue: rawReason)
-        {
-            reason = avReason.domainReason
-        } else {
-            reason = .unknown
+        @objc private func sessionWasInterrupted(_ notification: Notification) {
+            // Don't sample a frozen depth map while interrupted; it resumes when depth frames flow.
+            latestDepthMap = nil
+            let reason: PhotoCaptureClient.InterruptionReason
+            if let userInfo = notification.userInfo,
+                let rawReason = userInfo[AVCaptureSessionInterruptionReasonKey] as? Int,
+                let avReason = AVCaptureSession.InterruptionReason(rawValue: rawReason)
+            {
+                reason = avReason.domainReason
+            } else {
+                reason = .unknown
+            }
+            onEvent?(.sessionInterrupted(reason))
         }
-        onEvent?(.sessionInterrupted(reason))
-    }
 
-    @objc private func sessionInterruptionEnded(_ notification: Notification) {
-        onEvent?(.sessionInterruptionEnded)
-    }
+        @objc private func sessionInterruptionEnded(_ notification: Notification) {
+            onEvent?(.sessionInterruptionEnded)
+        }
     #endif
 
     @objc private func sessionRuntimeError(_ notification: Notification) {
@@ -608,9 +641,9 @@ extension PhotoCaptureDelegate: AVCapturePhotoCaptureDelegate {
 
         let dimensions = photo.resolvedSettings.photoDimensions
         #if os(iOS)
-        let isRaw = photo.isRawPhoto
+            let isRaw = photo.isRawPhoto
         #else
-        let isRaw = false
+            let isRaw = false
         #endif
         let domainPhoto = PhotoCaptureClient.Photo(
             fileDataRepresentation: photo.fileDataRepresentation(),
@@ -704,13 +737,13 @@ extension PhotoCaptureDelegate: AVCaptureDepthDataOutputDelegate {
         let map = oriented.depthDataMap
         latestDepthMap = map
         #if DEBUG
-        if !didLogDepth {
-            didLogDepth = true
-            onLog?(
-                "Depth map \(CVPixelBufferGetWidth(map))x\(CVPixelBufferGetHeight(map)) "
-                    + "(portrait expects height > width), exif=\(depthExifOrientation.rawValue)"
-            )
-        }
+            if !didLogDepth {
+                didLogDepth = true
+                onLog?(
+                    "Depth map \(CVPixelBufferGetWidth(map))x\(CVPixelBufferGetHeight(map)) "
+                        + "(portrait expects height > width), exif=\(depthExifOrientation.rawValue)"
+                )
+            }
         #endif
     }
 }
@@ -725,9 +758,9 @@ actor PhotoCaptureClientActor {
     private var currentPosition: PhotoCaptureClient.CameraPosition = .back
     private var currentFlashMode: PhotoCaptureClient.FlashMode = .auto
     #if os(iOS)
-    private var metalRenderer: MetalPreviewRenderer?
-    private var cachedPreviewView: PhotoCaptureClient.PreviewView?
-    private var currentVisualZoom: (factor: Float, anchorX: Float, anchorY: Float) = (1.0, 0.5, 0.5)
+        private var metalRenderer: MetalPreviewRenderer?
+        private var cachedPreviewView: PhotoCaptureClient.PreviewView?
+        private var currentVisualZoom: (factor: Float, anchorX: Float, anchorY: Float) = (1.0, 0.5, 0.5)
     #endif
     private var eventContinuations: [UUID: AsyncStream<PhotoCaptureClient.Event>.Continuation] = [:]
 
@@ -736,7 +769,7 @@ actor PhotoCaptureClientActor {
     init(
         logger: @escaping @Sendable (String) -> Void = { message in
             #if DEBUG
-            print("📷 [PHOTO_CAPTURE]: \(message)")
+                print("📷 [PHOTO_CAPTURE]: \(message)")
             #endif
         }
     ) {
@@ -764,17 +797,18 @@ actor PhotoCaptureClientActor {
         try delegate.configureSession(position: currentPosition)
         delegate.registerNotificationObservers()
         #if os(iOS)
-        let renderer = await MainActor.run { MetalPreviewRenderer.create() }
-        self.metalRenderer = renderer
-        delegate.onFrame = { [weak renderer] pixelBuffer in
-            renderer?.enqueueFrame(pixelBuffer)
-        }
-        // Link renderer to cached preview view (if getPreviewView was called before startSession)
-        if let renderer, let cached = cachedPreviewView {
-            renderer.previewViewRef = cached
-        }
-        // Invalidate cached preview so next getPreviewView returns one with the new renderer
-        cachedPreviewView = nil
+            let renderer = await MainActor.run { MetalPreviewRenderer.create() }
+            self.metalRenderer = renderer
+            delegate.onFrame = { [weak renderer] pixelBuffer in
+                renderer?.enqueueFrame(pixelBuffer)
+            }
+            await wireGestureCallbacks(to: renderer)
+            // Link renderer to cached preview view (if getPreviewView was called before startSession)
+            if let renderer, let cached = cachedPreviewView {
+                renderer.previewViewRef = cached
+            }
+            // Invalidate cached preview so next getPreviewView returns one with the new renderer
+            cachedPreviewView = nil
         #endif
         logger("Starting capture session")
         delegate.startRunning()
@@ -789,8 +823,8 @@ actor PhotoCaptureClientActor {
         delegate.pixelBufferContinuation?.finish()
         delegate.pixelBufferContinuation = nil
         #if os(iOS)
-        delegate.onFrame = nil
-        metalRenderer = nil
+            delegate.onFrame = nil
+            metalRenderer = nil
         #endif
         delegate.teardown()
         for continuation in eventContinuations.values {
@@ -820,10 +854,15 @@ actor PhotoCaptureClientActor {
         try delegate.switchCamera(to: position)
         currentPosition = position
         #if os(iOS)
-        currentVisualZoom = (1.0, 0.5, 0.5)
-        let renderer = metalRenderer
-        await MainActor.run { renderer?.resetVisualZoom() }
-        yieldEvent(.zoomChanged(1.0))
+            currentVisualZoom = (1.0, 0.5, 0.5)
+            let renderer = metalRenderer
+            let limits = delegate.zoomLimits()
+            await MainActor.run {
+                renderer?.resetVisualZoom()
+                renderer?.zoomLimits = limits
+                renderer?.resetZoomTracking()
+            }
+            yieldEvent(.zoomChanged(1.0))
         #endif
     }
 
@@ -840,7 +879,38 @@ actor PhotoCaptureClientActor {
     func setZoomFactor(_ factor: CGFloat) async throws {
         logger("Setting zoom factor to \(factor)")
         try delegate.setZoomFactor(factor)
+        #if os(iOS)
+            let renderer = metalRenderer
+            await MainActor.run { renderer?.syncZoomTracking(to: factor) }
+        #endif
     }
+
+    #if os(iOS)
+        /// Wire the renderer's default gestures to the capture device: pinch → clamped zoom, tap →
+        /// focus + auto-expose. Supplies the device's zoom limits so the pinch clamps on the main thread.
+        private func wireGestureCallbacks(to renderer: MetalPreviewRenderer?) async {
+            guard let renderer else { return }
+            let limits = delegate.zoomLimits()
+            await MainActor.run {
+                renderer.zoomLimits = limits
+                renderer.resetZoomTracking()
+                renderer.onZoomChange = { [weak self] factor in
+                    Task { await self?.applyGestureZoom(factor) }
+                }
+                renderer.onTapToFocus = { [weak self] point in
+                    Task { await self?.applyTapToFocus(point) }
+                }
+            }
+        }
+
+        private func applyGestureZoom(_ factor: CGFloat) {
+            delegate.setZoomFactorClamped(factor)
+        }
+
+        private func applyTapToFocus(_ point: CGPoint) {
+            delegate.focusAndExpose(at: point)
+        }
+    #endif
 
     func setVisualZoom(
         factor: CGFloat,
@@ -848,15 +918,15 @@ actor PhotoCaptureClientActor {
         anchorY: CGFloat
     ) async {
         #if os(iOS)
-        let clamped = Float(min(max(factor, 1.0), 5.0))
-        let clampedAX = Float(min(max(anchorX, 0.0), 1.0))
-        let clampedAY = Float(min(max(anchorY, 0.0), 1.0))
-        currentVisualZoom = (clamped, clampedAX, clampedAY)
-        let renderer = metalRenderer
-        await MainActor.run {
-            renderer?.setVisualZoom(factor: clamped, anchorX: clampedAX, anchorY: clampedAY)
-        }
-        yieldEvent(.zoomChanged(CGFloat(clamped)))
+            let clamped = Float(min(max(factor, 1.0), 5.0))
+            let clampedAX = Float(min(max(anchorX, 0.0), 1.0))
+            let clampedAY = Float(min(max(anchorY, 0.0), 1.0))
+            currentVisualZoom = (clamped, clampedAX, clampedAY)
+            let renderer = metalRenderer
+            await MainActor.run {
+                renderer?.setVisualZoom(factor: clamped, anchorX: clampedAX, anchorY: clampedAY)
+            }
+            yieldEvent(.zoomChanged(CGFloat(clamped)))
         #endif
     }
 
@@ -909,46 +979,46 @@ actor PhotoCaptureClientActor {
     // MARK: - Preview
 
     #if os(iOS)
-    func getPreviewView() -> PhotoCaptureClient.PreviewView {
-        if let cached = cachedPreviewView {
-            return cached
+        func getPreviewView() -> PhotoCaptureClient.PreviewView {
+            if let cached = cachedPreviewView {
+                return cached
+            }
+            let preview: PhotoCaptureClient.PreviewView
+            if let renderer = metalRenderer {
+                preview = PhotoCaptureClient.PreviewView(view: renderer)
+                renderer.previewViewRef = preview
+                // Sync current visual zoom state
+                preview.visualZoomFactor = currentVisualZoom.factor
+                preview.visualZoomAnchorX = currentVisualZoom.anchorX
+                preview.visualZoomAnchorY = currentVisualZoom.anchorY
+            } else {
+                preview = PhotoCaptureClient.PreviewView(view: UIView())
+            }
+            cachedPreviewView = preview
+            return preview
         }
-        let preview: PhotoCaptureClient.PreviewView
-        if let renderer = metalRenderer {
-            preview = PhotoCaptureClient.PreviewView(view: renderer)
-            renderer.previewViewRef = preview
-            // Sync current visual zoom state
-            preview.visualZoomFactor = currentVisualZoom.factor
-            preview.visualZoomAnchorX = currentVisualZoom.anchorX
-            preview.visualZoomAnchorY = currentVisualZoom.anchorY
-        } else {
-            preview = PhotoCaptureClient.PreviewView(view: UIView())
+
+        func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {
+            metalRenderer?.updateOverlays(overlays)
         }
-        cachedPreviewView = preview
-        return preview
-    }
 
-    func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {
-        metalRenderer?.updateOverlays(overlays)
-    }
+        func setLabelsVisible(_ visible: Bool) {
+            metalRenderer?.setLabelsVisible(visible)
+        }
 
-    func setLabelsVisible(_ visible: Bool) {
-        metalRenderer?.setLabelsVisible(visible)
-    }
-
-    func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {
-        metalRenderer?.setOverlayStyle(style)
-    }
+        func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {
+            metalRenderer?.setOverlayStyle(style)
+        }
     #else
-    func getPreviewView() -> PhotoCaptureClient.PreviewView {
-        return PhotoCaptureClient.PreviewView(view: NSView())
-    }
+        func getPreviewView() -> PhotoCaptureClient.PreviewView {
+            return PhotoCaptureClient.PreviewView(view: NSView())
+        }
 
-    func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {}
+        func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {}
 
-    func setLabelsVisible(_ visible: Bool) {}
+        func setLabelsVisible(_ visible: Bool) {}
 
-    func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {}
+        func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {}
     #endif
 
     // MARK: - Helpers
@@ -995,24 +1065,24 @@ extension AVAuthorizationStatus {
 }
 
 #if os(iOS)
-extension AVCaptureSession.InterruptionReason {
-    var domainReason: PhotoCaptureClient.InterruptionReason {
-        switch self {
-            case .videoDeviceNotAvailableInBackground:
-                .videoDeviceNotAvailableInBackground
-            case .audioDeviceInUseByAnotherClient:
-                .audioDeviceInUseByAnotherClient
-            case .videoDeviceInUseByAnotherClient:
-                .videoDeviceInUseByAnotherClient
-            case .videoDeviceNotAvailableWithMultipleForegroundApps:
-                .videoDeviceNotAvailableWithMultipleForegroundApps
-            case .videoDeviceNotAvailableDueToSystemPressure:
-                .videoDeviceNotAvailableDueToSystemPressure
-            case .sensitiveContentMitigationActivated:
-                .unknown
-            @unknown default:
-                .unknown
+    extension AVCaptureSession.InterruptionReason {
+        var domainReason: PhotoCaptureClient.InterruptionReason {
+            switch self {
+                case .videoDeviceNotAvailableInBackground:
+                    .videoDeviceNotAvailableInBackground
+                case .audioDeviceInUseByAnotherClient:
+                    .audioDeviceInUseByAnotherClient
+                case .videoDeviceInUseByAnotherClient:
+                    .videoDeviceInUseByAnotherClient
+                case .videoDeviceNotAvailableWithMultipleForegroundApps:
+                    .videoDeviceNotAvailableWithMultipleForegroundApps
+                case .videoDeviceNotAvailableDueToSystemPressure:
+                    .videoDeviceNotAvailableDueToSystemPressure
+                case .sensitiveContentMitigationActivated:
+                    .unknown
+                @unknown default:
+                    .unknown
+            }
         }
     }
-}
 #endif
