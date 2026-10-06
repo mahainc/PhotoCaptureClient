@@ -23,19 +23,16 @@
         let height: Float
     }
 
-    /// Maps a normalized texture-space box to screen-normalized (0..1, top-left) space, applying
-    /// the aspect-fill crop then the visual zoom — the exact inverse the camera shader applies.
-    ///
-    /// Returns `nil` when the box is **not fully inside** the visible preview (any edge crosses
-    /// `[0, 1]`). Shared by the Metal box pass and the label overlay so that a box and its label
-    /// are hidden together the moment the detection drifts off the visible frame.
-    func visibleScreenRect(
+    /// Maps a normalized texture-space box to screen-normalized (0..1, top-left) space, applying the
+    /// aspect-fill crop then the visual zoom — the exact inverse the camera shader applies. The rect
+    /// may extend outside `[0, 1]`; callers reject or clip it per their own policy.
+    func screenRect(
         minX: Float,
         minY: Float,
         width: Float,
         height: Float,
         transform: OverlayTransform
-    ) -> ScreenRect? {
+    ) -> ScreenRect {
         // Undo aspect-fill crop: screenUV = (texUV - uvOffset) / uvScale
         let baseX = (minX - transform.uvOffset.x) / transform.uvScale.x
         let baseY = (minY - transform.uvOffset.y) / transform.uvScale.y
@@ -44,13 +41,30 @@
         // Apply zoom (inverse of shader division → multiply about the anchor).
         let screenX = (baseX - transform.zoomAnchorX) * transform.zoomFactor + transform.zoomAnchorX
         let screenY = (baseY - transform.zoomAnchorY) * transform.zoomFactor + transform.zoomAnchorY
-        let screenW = baseW * transform.zoomFactor
-        let screenH = baseH * transform.zoomFactor
-        // Full-frame test: only fully-visible boxes survive.
-        guard screenX >= 0, screenY >= 0, screenX + screenW <= 1.0, screenY + screenH <= 1.0 else {
+        return ScreenRect(
+            minX: screenX,
+            minY: screenY,
+            width: baseW * transform.zoomFactor,
+            height: baseH * transform.zoomFactor
+        )
+    }
+
+    /// `screenRect` restricted to boxes that sit **fully inside** the visible preview (no edge crosses
+    /// `[0, 1]`); `nil` otherwise. Shared by the Metal box pass and the label overlay so that a box and
+    /// its label are hidden together the moment the detection drifts off the visible frame.
+    func visibleScreenRect(
+        minX: Float,
+        minY: Float,
+        width: Float,
+        height: Float,
+        transform: OverlayTransform
+    ) -> ScreenRect? {
+        let rect = screenRect(minX: minX, minY: minY, width: width, height: height, transform: transform)
+        guard rect.minX >= 0, rect.minY >= 0, rect.minX + rect.width <= 1.0, rect.minY + rect.height <= 1.0
+        else {
             return nil
         }
-        return ScreenRect(minX: screenX, minY: screenY, width: screenW, height: screenH)
+        return rect
     }
 
     /// `visibleScreenRect` for a whole `OverlayRect`, so the label and center-dot overlays cull an
@@ -66,6 +80,29 @@
             height: overlay.height,
             transform: transform
         )
+    }
+
+    /// `screenRect` for an `OverlayRect`, **clipped** to the visible frame rather than rejected: the
+    /// box's intersection with `[0, 1]`, or `nil` when it doesn't overlap the frame at all. The centre
+    /// dot uses this (not `visibleScreenRect`) so a large object the user has centred stays a target
+    /// even when its edges run past the preview — its clipped centre still reads as centred.
+    func clippedScreenRect(
+        for overlay: PhotoCaptureClient.OverlayRect,
+        transform: OverlayTransform
+    ) -> ScreenRect? {
+        let rect = screenRect(
+            minX: overlay.x,
+            minY: overlay.y,
+            width: overlay.width,
+            height: overlay.height,
+            transform: transform
+        )
+        let minX = max(0, rect.minX)
+        let minY = max(0, rect.minY)
+        let maxX = min(1, rect.minX + rect.width)
+        let maxY = min(1, rect.minY + rect.height)
+        guard maxX > minX, maxY > minY else { return nil }
+        return ScreenRect(minX: minX, minY: minY, width: maxX - minX, height: maxY - minY)
     }
 
     // MARK: - Detection Label Overlay View

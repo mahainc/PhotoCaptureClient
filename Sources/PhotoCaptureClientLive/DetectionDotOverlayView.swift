@@ -57,6 +57,12 @@
             /// full-frame box (coverage ≈ 1) gains ≈ 0.2 — well past `centreTieBand` — dropping it out
             /// of "both centered" so a smaller, genuinely nearer object takes the dot.
             static let coveragePenaltyWeight: Float = 0.5
+            /// Two objects count as "equally near" when their depth keys differ by less than this
+            /// (metres); detector confidence then decides between them.
+            static let depthTieBand: Float = 0.3
+            /// When two objects are both centred and equally near, a challenger needs at least this
+            /// much more confidence (0–1) before it takes the dot.
+            static let confidenceTieDelta: Float = 0.1
             /// Metres added beyond the farthest valid depth in a frame to rank objects whose depth
             /// couldn't be sampled — they fall behind any object with a real reading, but stay ordered
             /// among themselves by center-proximity.
@@ -117,6 +123,9 @@
             /// Fraction of the frame the fully-visible box covers (0–1, 1 = fills the frame). Feeds the
             /// coverage penalty that stops a frame-filling box from reading as perfectly centered.
             let coverage: Float
+            /// Detector confidence (0–1); `nil` when the overlay carries none. Breaks ties between
+            /// objects that are both centred and equally near.
+            let confidence: Float?
         }
 
         private enum Decision {
@@ -288,11 +297,12 @@
             }
         }
 
-        /// Map every fully-visible overlay to a `Candidate`, dropping degenerate (zero / non-finite
-        /// area) boxes so the area-ratio hysteresis can't collapse to "always switch".
+        /// Map every overlay that overlaps the frame to a `Candidate`, using its visible (clipped)
+        /// rect so a large object the user has centred still qualifies, and dropping degenerate (zero
+        /// / non-finite area) boxes so the area-ratio hysteresis can't collapse to "always switch".
         private func makeCandidates(size: CGSize) -> [Candidate] {
             overlays.compactMap { overlay in
-                guard let rect = visibleScreenRect(for: overlay, transform: overlayTransform) else {
+                guard let rect = clippedScreenRect(for: overlay, transform: overlayTransform) else {
                     return nil
                 }
                 let screenArea = rect.width * rect.height
@@ -316,7 +326,8 @@
                     depth: overlay.depth,
                     trackedSeconds: overlay.trackedSeconds,
                     proximity: (proximityX * proximityX + proximityY * proximityY).squareRoot(),
-                    coverage: screenArea
+                    coverage: screenArea,
+                    confidence: overlay.confidence
                 )
             }
         }
@@ -358,7 +369,12 @@
                 if abs(lhsAim - rhsAim) > Tuning.centreTieBand {
                     return lhsAim < rhsAim
                 }
-                return depthKey(lhs) < depthKey(rhs)
+                let lhsDepth = depthKey(lhs)
+                let rhsDepth = depthKey(rhs)
+                if abs(lhsDepth - rhsDepth) > Tuning.depthTieBand {
+                    return lhsDepth < rhsDepth
+                }
+                return (lhs.confidence ?? 0) > (rhs.confidence ?? 0)
             }
             // Whether `challenger` *clearly* beats `incumbent`: clearly more centered, or — when the
             // two are comparably centered — clearly nearer in depth.
@@ -379,7 +395,11 @@
                         Tuning.switchDepthFloor,
                         depthKey(incumbent) * Tuning.switchDepthFraction
                     )
-                    return depthGap >= depthThreshold
+                    if depthGap >= depthThreshold { return true }
+                    if abs(depthGap) <= Tuning.depthTieBand {
+                        return (challenger.confidence ?? 0) - (incumbent.confidence ?? 0)
+                            >= Tuning.confidenceTieDelta
+                    }
                 }
                 return false
             }
@@ -541,12 +561,15 @@
             _ texCenter: SIMD2<Float>,
             size: CGSize
         ) -> CGPoint {
-            let transform = overlayTransform
-            let baseX = (texCenter.x - transform.uvOffset.x) / transform.uvScale.x
-            let baseY = (texCenter.y - transform.uvOffset.y) / transform.uvScale.y
-            let screenX = (baseX - transform.zoomAnchorX) * transform.zoomFactor + transform.zoomAnchorX
-            let screenY = (baseY - transform.zoomAnchorY) * transform.zoomFactor + transform.zoomAnchorY
-            return CGPoint(x: CGFloat(screenX) * size.width, y: CGFloat(screenY) * size.height)
+            // A point is a zero-size box, so it shares `screenRect`'s aspect-fill + zoom mapping.
+            let rect = screenRect(
+                minX: texCenter.x,
+                minY: texCenter.y,
+                width: 0,
+                height: 0,
+                transform: overlayTransform
+            )
+            return CGPoint(x: CGFloat(rect.minX) * size.width, y: CGFloat(rect.minY) * size.height)
         }
 
         private func hideDot() {
