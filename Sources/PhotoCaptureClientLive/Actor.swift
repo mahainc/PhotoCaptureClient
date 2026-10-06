@@ -8,8 +8,6 @@ import os
 #if os(iOS)
     import UIKit
     import MetalKit
-#else
-    import AppKit
 #endif
 
 // MARK: - Delegate
@@ -204,8 +202,6 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
                     .builtInDualCamera,
                     .builtInWideAngleCamera,
                 ]
-        #else
-            let preferred: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
         #endif
         let discovery = AVCaptureDevice.DiscoverySession(
             deviceTypes: preferred,
@@ -494,10 +490,6 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
             guard let device = currentDevice else { return (1, 1) }
             return (device.minAvailableVideoZoomFactor, device.maxAvailableVideoZoomFactor)
         }
-    #else
-        func setZoomFactor(_ factor: CGFloat) throws {
-            throw PhotoCaptureClient.Error.cameraUnavailable
-        }
     #endif
 
     func teardown() {
@@ -642,8 +634,6 @@ extension PhotoCaptureDelegate: AVCapturePhotoCaptureDelegate {
         let dimensions = photo.resolvedSettings.photoDimensions
         #if os(iOS)
             let isRaw = photo.isRawPhoto
-        #else
-            let isRaw = false
         #endif
         let domainPhoto = PhotoCaptureClient.Photo(
             fileDataRepresentation: photo.fileDataRepresentation(),
@@ -1009,16 +999,6 @@ actor PhotoCaptureClientActor {
         func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {
             metalRenderer?.setOverlayStyle(style)
         }
-    #else
-        func getPreviewView() -> PhotoCaptureClient.PreviewView {
-            return PhotoCaptureClient.PreviewView(view: NSView())
-        }
-
-        func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {}
-
-        func setLabelsVisible(_ visible: Bool) {}
-
-        func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {}
     #endif
 
     // MARK: - Helpers

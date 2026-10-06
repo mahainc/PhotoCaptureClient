@@ -3,8 +3,6 @@ import Foundation
 import PhotoCaptureClient
 #if os(iOS)
 import UIKit
-#else
-import AppKit
 #endif
 
 /// A dependency client for simultaneous multi-camera capture and video recording.
@@ -136,8 +134,6 @@ public struct MultiCamClient: Sendable {
 		await MainActor.run {
 			#if os(iOS)
 			PreviewView(view: UIView())
-			#else
-			PreviewView(view: NSView())
 			#endif
 		}
 	}

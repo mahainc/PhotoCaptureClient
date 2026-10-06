@@ -5,8 +5,6 @@ import Foundation
 import PhotoCaptureClient
 #if os(iOS)
 import UIKit
-#else
-import AppKit
 #endif
 
 // MARK: - Aspect Ratio
@@ -385,8 +383,6 @@ extension MultiCamClient {
 	public final class PreviewView: @unchecked Sendable, Equatable {
 		#if os(iOS)
 		public let view: UIView
-		#else
-		public let view: NSView
 		#endif
 
 		/// Current layout applied to the preview.
@@ -394,11 +390,6 @@ extension MultiCamClient {
 
 		#if os(iOS)
 		public init(view: UIView, layout: Layout = .grid(.init())) {
-			self.view = view
-			self.layout = layout
-		}
-		#else
-		public init(view: NSView, layout: Layout = .grid(.init())) {
 			self.view = view
 			self.layout = layout
 		}

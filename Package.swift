@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "PhotoCaptureClient",
     platforms: [
-        .iOS(.v17), .macOS(.v14),
+        .iOS(.v17),
     ],
     products: [
         .singleTargetLibrary("PhotoCaptureClient"),

@@ -3,8 +3,6 @@ import Foundation
 
 #if os(iOS)
     import UIKit
-#else
-    import AppKit
 #endif
 
 // MARK: - Dependency Registration
@@ -36,10 +34,6 @@ private enum MockConstants {
 #if os(iOS)
     private func _mockPreviewView() async -> PhotoCaptureClient.PreviewView {
         await MainActor.run { PhotoCaptureClient.PreviewView(view: UIView()) }
-    }
-#else
-    private func _mockPreviewView() async -> PhotoCaptureClient.PreviewView {
-        await MainActor.run { PhotoCaptureClient.PreviewView(view: NSView()) }
     }
 #endif
 

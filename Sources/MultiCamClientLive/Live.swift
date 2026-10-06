@@ -83,8 +83,4 @@ extension MultiCamClient: DependencyKey {
 		)
 	}()
 }
-#else
-extension MultiCamClient: DependencyKey {
-	public static let liveValue: MultiCamClient = .noop
-}
 #endif

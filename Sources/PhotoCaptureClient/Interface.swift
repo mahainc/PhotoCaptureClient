@@ -3,8 +3,6 @@ import Foundation
 
 #if os(iOS)
     import UIKit
-#else
-    import AppKit
 #endif
 
 /// A dependency client wrapping AVFoundation's photo capture APIs for use with TCA.
@@ -74,8 +72,6 @@ public struct PhotoCaptureClient: Sendable {
         await MainActor.run {
             #if os(iOS)
                 PreviewView(view: UIView())
-            #else
-                PreviewView(view: NSView())
             #endif
         }
     }

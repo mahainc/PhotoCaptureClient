@@ -7,8 +7,6 @@ import simd
 
 #if os(iOS)
     import UIKit
-#else
-    import AppKit
 #endif
 
 // MARK: - Photo
@@ -140,8 +138,6 @@ extension PhotoCaptureClient {
     public final class PreviewView: @unchecked Sendable, Equatable {
         #if os(iOS)
             public let view: UIView
-        #else
-            public let view: NSView
         #endif
 
         /// Aspect-fill UV scale — how much of the texture is visible (1.0 = full, <1.0 = cropped).
@@ -161,10 +157,6 @@ extension PhotoCaptureClient {
 
         #if os(iOS)
             public init(view: UIView) {
-                self.view = view
-            }
-        #else
-            public init(view: NSView) {
                 self.view = view
             }
         #endif
