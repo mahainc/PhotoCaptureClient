@@ -53,6 +53,21 @@
         return ScreenRect(minX: screenX, minY: screenY, width: screenW, height: screenH)
     }
 
+    /// `visibleScreenRect` for a whole `OverlayRect`, so the label and center-dot overlays cull an
+    /// off-screen box through the one shared call instead of each spelling out its four fields.
+    func visibleScreenRect(
+        for overlay: PhotoCaptureClient.OverlayRect,
+        transform: OverlayTransform
+    ) -> ScreenRect? {
+        visibleScreenRect(
+            minX: overlay.x,
+            minY: overlay.y,
+            width: overlay.width,
+            height: overlay.height,
+            transform: transform
+        )
+    }
+
     // MARK: - Detection Label Overlay View
 
     /// Draws detection labels (class name + confidence) as pooled `UILabel`s above the Metal
@@ -123,15 +138,7 @@
                 guard let text = labelText(for: overlay), !text.isEmpty else {
                     continue
                 }
-                guard
-                    let rect = visibleScreenRect(
-                        minX: overlay.x,
-                        minY: overlay.y,
-                        width: overlay.width,
-                        height: overlay.height,
-                        transform: overlayTransform
-                    )
-                else {
+                guard let rect = visibleScreenRect(for: overlay, transform: overlayTransform) else {
                     continue
                 }
 

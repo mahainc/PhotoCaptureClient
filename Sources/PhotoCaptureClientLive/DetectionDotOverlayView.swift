@@ -48,6 +48,15 @@
             /// depth — not position — decides between them. Center is the primary signal: the user
             /// aims at what they mean, so a nearer object only wins when it is just as centered.
             static let centreTieBand: Float = 0.08
+            /// Fraction of the frame a box may cover before it starts reading as backdrop rather than
+            /// subject. A box that fills the frame has its center at the frame center for free, which
+            /// let a far, frame-filling object win center-first outright; coverage past this cap is
+            /// penalised so it no longer does.
+            static let coverageSoftCap: Float = 0.6
+            /// Center-proximity added per unit of coverage beyond `coverageSoftCap`. Tuned so a
+            /// full-frame box (coverage ≈ 1) gains ≈ 0.2 — well past `centreTieBand` — dropping it out
+            /// of "both centered" so a smaller, genuinely nearer object takes the dot.
+            static let coveragePenaltyWeight: Float = 0.5
             /// Metres added beyond the farthest valid depth in a frame to rank objects whose depth
             /// couldn't be sampled — they fall behind any object with a real reading, but stay ordered
             /// among themselves by center-proximity.
@@ -105,6 +114,9 @@
             let trackedSeconds: TimeInterval
             /// Normalized screen-space distance from the frame center (0 = centered, ≈0.7 at a corner).
             let proximity: Float
+            /// Fraction of the frame the fully-visible box covers (0–1, 1 = fills the frame). Feeds the
+            /// coverage penalty that stops a frame-filling box from reading as perfectly centered.
+            let coverage: Float
         }
 
         private enum Decision {
@@ -280,15 +292,7 @@
         /// area) boxes so the area-ratio hysteresis can't collapse to "always switch".
         private func makeCandidates(size: CGSize) -> [Candidate] {
             overlays.compactMap { overlay in
-                guard
-                    let rect = visibleScreenRect(
-                        minX: overlay.x,
-                        minY: overlay.y,
-                        width: overlay.width,
-                        height: overlay.height,
-                        transform: overlayTransform
-                    )
-                else {
+                guard let rect = visibleScreenRect(for: overlay, transform: overlayTransform) else {
                     return nil
                 }
                 let screenArea = rect.width * rect.height
@@ -311,9 +315,19 @@
                     color: overlay.color,
                     depth: overlay.depth,
                     trackedSeconds: overlay.trackedSeconds,
-                    proximity: (proximityX * proximityX + proximityY * proximityY).squareRoot()
+                    proximity: (proximityX * proximityX + proximityY * proximityY).squareRoot(),
+                    coverage: screenArea
                 )
             }
+        }
+
+        /// Center-proximity adjusted so a frame-filling box no longer reads as perfectly centered:
+        /// coverage beyond `coverageSoftCap` is penalised, so a far object that merely fills the frame
+        /// ranks behind a smaller object genuinely near the center. This is the key the center-first
+        /// ranking compares, in place of raw `proximity`.
+        private func aimProximity(_ candidate: Candidate) -> Float {
+            let excessCoverage = max(0, candidate.coverage - Tuning.coverageSoftCap)
+            return candidate.proximity + excessCoverage * Tuning.coveragePenaltyWeight
         }
 
         /// Decide what the dot should do this frame, ranking center-first — the object nearest the
@@ -323,11 +337,6 @@
             candidates: [Candidate],
             now: CFTimeInterval
         ) -> Decision {
-            guard !candidates.isEmpty else {
-                // Nothing fully visible — hold briefly so a one-frame dropout doesn't blink the dot.
-                return withinHold(now) ? .hold : .hide
-            }
-
             // Depth tiebreaker scalar: metric depth when available; otherwise a penalty placed just
             // beyond the farthest real reading so depth-less candidates rank behind any real one but
             // stay ordered among themselves. Consulted only between objects that are comparably
@@ -344,8 +353,10 @@
                 _ lhs: Candidate,
                 _ rhs: Candidate
             ) -> Bool {
-                if abs(lhs.proximity - rhs.proximity) > Tuning.centreTieBand {
-                    return lhs.proximity < rhs.proximity
+                let lhsAim = aimProximity(lhs)
+                let rhsAim = aimProximity(rhs)
+                if abs(lhsAim - rhsAim) > Tuning.centreTieBand {
+                    return lhsAim < rhsAim
                 }
                 return depthKey(lhs) < depthKey(rhs)
             }
@@ -355,10 +366,11 @@
                 _ challenger: Candidate,
                 than incumbent: Candidate
             ) -> Bool {
-                let proximityGap = incumbent.proximity - challenger.proximity
+                let incumbentAim = aimProximity(incumbent)
+                let proximityGap = incumbentAim - aimProximity(challenger)
                 let proximityThreshold = max(
                     Tuning.switchProximityFloor,
-                    incumbent.proximity * Tuning.switchProximityFraction
+                    incumbentAim * Tuning.switchProximityFraction
                 )
                 if proximityGap >= proximityThreshold { return true }
                 if abs(proximityGap) <= Tuning.centreTieBand {
@@ -372,6 +384,8 @@
                 return false
             }
 
+            // `min(by:)` is nil only when nothing is fully visible — hold briefly so a one-frame
+            // dropout doesn't blink the dot.
             guard let best = candidates.min(by: isBetter) else {
                 return withinHold(now) ? .hold : .hide
             }
@@ -379,7 +393,9 @@
             guard let current = continuation(in: candidates) else {
                 // Tracked object absent this frame. Hold only if it's worth waiting for — i.e. the
                 // best available alternative is less centered (or comparably centered but farther)
-                // than what we were tracking.
+                // than what we were tracking. Raw proximity (not aimProximity) is deliberate on this
+                // brief hold-grace path: `best` is already the coverage-penalised winner from
+                // `isBetter`, and this only decides whether to wait out a one-frame dropout.
                 let lastDepthKey =
                     lastTargetDepth ?? (penaltyBase.map { $0 + Tuning.depthlessPenalty } ?? 0)
                 let bestDepthKey = depthKey(best)

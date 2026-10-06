@@ -3,6 +3,7 @@
   "schema_version": "1.0",
   "generated_by": "harness-init 1.5",
   "last_updated": "2026-10-06",
+  "active_feature": "detection-002",
   "rules": {
     "single_active_feature": true,
     "passing_requires_evidence": true,
@@ -81,6 +82,57 @@
       ],
       "evidence": [],
       "notes": "Design đầy đủ ở docs/zoom-focus-gestures-design.md. API lập trình (setZoomFactor/setVisualZoom/focus) đã có trong Sources/PhotoCaptureClient/Interface.swift; còn thiếu wire UIPinchGestureRecognizer/UITapGestureRecognizer + callback onTapToFocus/onZoomChange trong MetalPreviewRenderer.swift và Actor.swift."
+    },
+    {
+      "id": "detection-002",
+      "priority": 1,
+      "area": "detection",
+      "title": "Center-dot: coverage-penalty để vật xa full-frame không cướp dot",
+      "user_visible_behavior": "Khi một vật ở xa phủ kín khung xuất hiện, center-dot không còn tự nhảy sang nó; dot vẫn bám vật ở gần/giữa khung vì box càng phủ kín khung càng bị coi là nền.",
+      "status": "in_progress",
+      "dependencies": ["detection-001"],
+      "verification": [
+        "xcode-build biên dịch sạch; clean-code gate PASS",
+        "Device test: cảnh có một vật ở xa phủ kín khung + một vật nhỏ ở giữa → dot bám vật ở giữa, không nhảy sang vật full-frame",
+        "Device test: dot không nhấp nháy nhiều hơn trước (hysteresis/hold giữ nguyên)"
+      ],
+      "evidence": [
+        "xcode-build --scheme PhotoCaptureClient-Package --platform ios: probe-pass (3 lần, 0 lỗi, không warning mới)",
+        "clean-code review: coverage-penalty + G5 dedup đều settled ok; G11 (nhánh hold raw proximity) ok có chủ đích; gate BYPASS vì 1 finding CÓ SẴN ngoài phạm vi (projectedPoint G5 → detection-004)",
+        "Sources/PhotoCaptureClientLive/DetectionDotOverlayView.swift (coverage-penalty), DetectionLabelOverlayView.swift + MetalPreviewRenderer.swift (overload visibleScreenRect dùng chung), .swift-format (giữ thụt #if os(iOS))"
+      ],
+      "notes": "Impl thực tế (khác plan ở chi tiết): thêm Candidate.coverage (= screenArea), Tuning.coverageSoftCap=0.6/coveragePenaltyWeight=0.5, method aimProximity(_:), thay proximity thô bằng aimProximity trong isBetter/isClearlyBetter. Nhánh continuation-lost giữ raw proximity CÓ CHỦ ĐÍCH (đã comment) — không đụng apply (tránh kéo F1/F3 có sẵn). Kèm fix G5: overload visibleScreenRect(for:transform:) dùng ở 3 call site + bỏ guard !candidates.isEmpty thừa (G9/G29). Thêm .swift-format repo-root để normalizer giữ thụt #if (khớp các file anh em). CÒN LẠI: device test (2 mục verification) phải chạy trên máy thật — giữ in_progress tới khi có kết quả."
+    },
+    {
+      "id": "detection-003",
+      "priority": 1,
+      "area": "detection",
+      "title": "Center-dot: depth near-first + confidence tiebreaker",
+      "user_visible_behavior": "Khi hai vật cùng mức center, dot ưu tiên vật gần hơn; nếu độ sâu cũng sát nhau thì ưu tiên vật có confidence cao hơn.",
+      "status": "not_started",
+      "dependencies": ["detection-002"],
+      "verification": [
+        "xcode-build biên dịch sạch; clean-code gate PASS",
+        "Device test: hai vật cùng mức center khác độ sâu → dot chọn vật gần hơn",
+        "Device test: hai vật cùng center + cùng độ sâu, khác confidence → dot chọn vật confidence cao hơn"
+      ],
+      "evidence": [],
+      "notes": "Plan: ~/.claude/plans/logical-yawning-reef.md (hướng B + confidence). Tiếp tục DetectionDotOverlayView.swift: thêm Candidate.confidence (= OverlayRect.confidence, field đã có ở Models.swift:252), Tuning.confidenceTieDelta=0.1; bổ sung depth near-first + nhánh confidence vào isBetter/isClearlyBetter. Trước khi dựa vào confidence: xác nhận phía app điền OverlayRect.confidence (init nằm ngoài package) — nếu luôn nil thì tiebreaker vô hiệu, cần nối ở nơi tạo overlay."
+    },
+    {
+      "id": "detection-004",
+      "priority": 3,
+      "area": "detection",
+      "title": "Dedup projectedPoint ↔ visibleScreenRect (nợ kỹ thuật)",
+      "user_visible_behavior": "Không đổi hành vi người dùng — refactor nội bộ: projectedPoint và visibleScreenRect dùng chung một helper map điểm (undo aspect-fill + zoom) thay vì lặp lại công thức.",
+      "status": "not_started",
+      "dependencies": ["detection-002"],
+      "verification": [
+        "xcode-build biên dịch sạch; clean-code gate PASS (finding G5 projectedPoint biến mất)",
+        "Device test: center-dot, box, label vẫn định vị đúng dưới pinch-zoom (math transform không đổi kết quả)"
+      ],
+      "evidence": [],
+      "notes": "Nợ kỹ thuật CÓ SẴN phát hiện khi làm detection-002 (clean-code gate round 2 BLOCK, finding G5:b95343b5). projectedPoint (DetectionDotOverlayView.swift ~L540-549) tự lặp lại math aspect-fill-undo + zoom của visibleScreenRect (DetectionLabelOverlayView.swift ~L39-54) — chính comment của nó thừa nhận. Fix: rút phần map một điểm normalized→screen thành helper dùng chung cho cả hai. Là refactor hot-path transform nên cần device-test kỹ."
     }
   ]
 }

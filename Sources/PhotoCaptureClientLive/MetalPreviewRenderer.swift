@@ -501,15 +501,7 @@
                 let overlay = overlays[index]
                 // Map texture space → screen-normalized (aspect-fill + zoom). Returns nil when the box
                 // is not fully inside the visible preview, so partially-cropped boxes are skipped.
-                guard
-                    let rect = visibleScreenRect(
-                        minX: overlay.x,
-                        minY: overlay.y,
-                        width: overlay.width,
-                        height: overlay.height,
-                        transform: transform
-                    )
-                else {
+                guard let rect = visibleScreenRect(for: overlay, transform: transform) else {
                     continue
                 }
 
