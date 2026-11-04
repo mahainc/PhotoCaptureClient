@@ -53,6 +53,9 @@ extension PhotoCaptureClient: DependencyKey {
             },
             setOverlayStyle: { style in
                 Task { await actor.setOverlayStyle(style) }
+            },
+            setPreviewPerformanceMode: { mode in
+                await actor.setPreviewPerformanceMode(mode)
             }
         )
     }()

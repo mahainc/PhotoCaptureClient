@@ -373,6 +373,43 @@ private final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         device.activeVideoMaxFrameDuration = duration
     }
 
+    /// The preview frame rate held while a result covers the feed — low enough to shed heat, high
+    /// enough that motion behind the result still reads as live rather than stepped.
+    private static let reducedPreviewFrameRate: Double = 15
+
+    /// Lower the live preview's cost in place, or restore the full viewfinder. `reduced` drops the
+    /// depth pipeline, caps the frame rate, and shrinks the camera texture; `full` re-runs the
+    /// initial depth/format/30fps configuration so the viewfinder returns exactly as it started.
+    func setPreviewPerformanceMode(reduced: Bool) {
+        guard let session = captureSession, let device = currentDevice else { return }
+        session.beginConfiguration()
+        if reduced {
+            detachDepthOutput(from: session)
+            latestDepthMap = nil
+            if session.canSetSessionPreset(.hd1280x720) {
+                session.sessionPreset = .hd1280x720
+            }
+            if (try? device.lockForConfiguration()) != nil {
+                applyClampedFrameRate(device, target: Self.reducedPreviewFrameRate)
+                device.unlockForConfiguration()
+            }
+        } else {
+            session.sessionPreset = .photo
+            configureDepth(session: session, device: device)
+        }
+        session.commitConfiguration()
+    }
+
+    /// Remove the depth output without the format/frame-rate restore `disableDepth` performs: the
+    /// reduced mode sets both itself and must not be bounced back to 30fps here.
+    private func detachDepthOutput(from session: AVCaptureSession) {
+        if let existing = depthDataOutput {
+            session.removeOutput(existing)
+            depthDataOutput = nil
+        }
+        hasDepth = false
+    }
+
     func startRunning() {
         sessionQueue.async { [weak self] in
             self?.captureSession?.startRunning()
@@ -859,6 +896,11 @@ actor PhotoCaptureClientActor {
     func setFlashMode(_ mode: PhotoCaptureClient.FlashMode) {
         logger("Setting flash mode to \(mode)")
         currentFlashMode = mode
+    }
+
+    func setPreviewPerformanceMode(_ mode: PhotoCaptureClient.PreviewPerformanceMode) {
+        logger("Setting preview performance mode to \(mode)")
+        delegate.setPreviewPerformanceMode(reduced: mode == .reduced)
     }
 
     func focus(at point: CGPoint) async throws {

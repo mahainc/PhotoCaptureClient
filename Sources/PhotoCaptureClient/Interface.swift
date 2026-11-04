@@ -89,4 +89,10 @@ public struct PhotoCaptureClient: Sendable {
     /// Choose how detection overlays are drawn on the live preview (boxes vs. a single
     /// animated center dot). Overlay data is still supplied via `updateOverlays`.
     public var setOverlayStyle: @Sendable (_ style: OverlayStyle) -> Void = { _ in }
+
+    // MARK: - Preview Performance
+
+    /// Lower (or restore) the live preview's running cost without tearing the session down —
+    /// used when a result floats over the feed and the full viewfinder is not worth its heat.
+    public var setPreviewPerformanceMode: @Sendable (_ mode: PreviewPerformanceMode) async -> Void = { _ in }
 }

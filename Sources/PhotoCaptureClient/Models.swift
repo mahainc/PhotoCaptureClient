@@ -292,6 +292,18 @@ extension PhotoCaptureClient {
     }
 }
 
+// MARK: - PreviewPerformanceMode
+
+extension PhotoCaptureClient {
+    /// How much the live preview pipeline is allowed to cost. `reduced` trades fidelity for a
+    /// thermal floor while the feed is backgrounded behind other content (depth off, low frame
+    /// rate, smaller texture); `full` is the normal viewfinder configuration.
+    public enum PreviewPerformanceMode: Sendable, Equatable {
+        case full
+        case reduced
+    }
+}
+
 // MARK: - Error
 
 extension PhotoCaptureClient {

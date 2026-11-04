@@ -57,7 +57,8 @@ extension PhotoCaptureClient {
         previewView: { await _mockPreviewView() },
         updateOverlays: { _ in },
         setLabelsVisible: { _ in },
-        setOverlayStyle: { _ in }
+        setOverlayStyle: { _ in },
+        setPreviewPerformanceMode: { _ in }
     )
 
     /// Returns realistic mock data with small delays to simulate real behavior.
@@ -96,7 +97,8 @@ extension PhotoCaptureClient {
         previewView: { await _mockPreviewView() },
         updateOverlays: { _ in },
         setLabelsVisible: { _ in },
-        setOverlayStyle: { _ in }
+        setOverlayStyle: { _ in },
+        setPreviewPerformanceMode: { _ in }
     )
 
     /// Throws errors for operations that can fail.
@@ -134,6 +136,7 @@ extension PhotoCaptureClient {
         previewView: { await _mockPreviewView() },
         updateOverlays: { _ in },
         setLabelsVisible: { _ in },
-        setOverlayStyle: { _ in }
+        setOverlayStyle: { _ in },
+        setPreviewPerformanceMode: { _ in }
     )
 }

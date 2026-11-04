@@ -64,6 +64,16 @@ final class PhotoCaptureClientTests: XCTestCase {
 		}
 	}
 
+	func testPreviewPerformanceModeIsCallable() async {
+		await withDependencies {
+			$0.photoCapture = .happy
+		} operation: {
+			@Dependency(\.photoCapture) var client
+			await client.setPreviewPerformanceMode(.reduced)
+			await client.setPreviewPerformanceMode(.full)
+		}
+	}
+
 	func testPhotoSettingsConvenience() {
 		let defaultSettings = PhotoCaptureClient.PhotoSettings.default
 		XCTAssertEqual(defaultSettings.flashMode, .auto)
