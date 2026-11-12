@@ -97,7 +97,12 @@ public struct PhotoCaptureClient: Sendable {
 
     /// Adjust the live histogram's channels, on-screen frame, and opacity. Takes effect on the
     /// next drawn frame; independent of `setHistogramVisible`.
-    public var setHistogramConfig: @Sendable (_ config: HistogramConfig) -> Void = { _ in }
+    public var setHistogramConfig: @Sendable (_ config: Histogram.Config) -> Void = { _ in }
+
+    /// Per-channel RGBA gain applied to the live preview in real time (and to the histogram reading
+    /// it), so dragging the R/G/B/A controls visibly changes the viewfinder. `(1,1,1,1)` leaves the
+    /// feed untouched. Affects the preview only, not the captured photo.
+    public var setPreviewChannelGains: @Sendable (_ gains: SIMD4<Float>) -> Void = { _ in }
 
     // MARK: - Preview Performance
 

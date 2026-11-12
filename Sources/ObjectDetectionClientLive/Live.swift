@@ -6,33 +6,33 @@ import PhotoCaptureClient
 /// When `startDetection` is called, it resolves `@Dependency(\.photoCapture)` from the
 /// current dependency context to access the pixel buffer stream.
 extension ObjectDetectionClient: DependencyKey {
-	public static let liveValue: ObjectDetectionClient = {
-		let actor = ObjectDetectionClientActor(logger: { DiagnosticLog.shared.log($0) })
-		let segmentationEngine = SegmentationEngine()
+    public static let liveValue: ObjectDetectionClient = {
+        let actor = ObjectDetectionClientActor(logger: { DiagnosticLog.shared.log($0) })
+        let segmentationEngine = SegmentationEngine()
 
-		return ObjectDetectionClient(
-			currentMode: {
-				actor.currentMode()
-			},
-			startDetection: { configuration in
-				@Dependency(\.photoCapture) var photoCapture
-				try await actor.startDetection(
-					configuration: configuration,
-					pixelBufferStream: photoCapture.pixelBufferStream
-				)
-			},
-			stopDetection: {
-				await actor.stopDetection()
-			},
-			detectionResults: {
-				await actor.observeResults()
-			},
-			detectInImage: { imageData in
-				try await actor.detectInImage(imageData)
-			},
-			segmentInImage: { imageData in
-				try await segmentationEngine.segment(imageData)
-			}
-		)
-	}()
+        return ObjectDetectionClient(
+            currentMode: {
+                actor.currentMode()
+            },
+            startDetection: { configuration in
+                @Dependency(\.photoCapture) var photoCapture
+                try await actor.startDetection(
+                    configuration: configuration,
+                    pixelBufferStream: photoCapture.pixelBufferStream
+                )
+            },
+            stopDetection: {
+                await actor.stopDetection()
+            },
+            detectionResults: {
+                await actor.observeResults()
+            },
+            detectInImage: { imageData in
+                try await actor.detectInImage(imageData)
+            },
+            segmentInImage: { imageData in
+                try await segmentationEngine.segment(imageData)
+            }
+        )
+    }()
 }

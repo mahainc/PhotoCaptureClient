@@ -6,47 +6,10 @@
     import PhotoCaptureClient
     import os
 
-    // MARK: - Aspect-Fill Uniforms (matches Metal struct layout)
-
-    /// Must match `AspectFillUniforms` in Shaders.metal exactly.
-    private struct AspectFillUniforms {
-        var uvScale: SIMD2<Float>
-        var uvOffset: SIMD2<Float>
-        var zoomFactor: Float
-        var _pad: Float
-        var zoomAnchor: SIMD2<Float>
-    }
-
-    // MARK: - Box Vertex (matches Metal struct layout)
-
-    /// Must match `BoxVertex` in Shaders.metal exactly.
-    /// `color` (SIMD4, 16-byte aligned) is first so there is no padding between fields.
-    private struct BoxVertex {
-        var color: SIMD4<Float>
-        var position: SIMD2<Float>
-        /// Position within the box in pixels, relative to its center (for the SDF border).
-        var localPos: SIMD2<Float>
-        /// Box half-extent in pixels.
-        var halfSize: SIMD2<Float>
-        /// x = corner radius (px), y = border width (px).
-        var params: SIMD2<Float>
-    }
-
     /// Wrapper to make CVMetalTexture + MTLTexture pair Sendable for use in OSAllocatedUnfairLock.
     private struct CameraFrame: @unchecked Sendable {
         let cvTexture: CVMetalTexture
         let mtlTexture: MTLTexture
-    }
-
-    /// The Metal objects the renderer owns, grouped so the factory hands them to `init` as one value.
-    private struct Resources {
-        let device: MTLDevice
-        let commandQueue: MTLCommandQueue
-        let textureCache: CVMetalTextureCache
-        let cameraPipeline: MTLRenderPipelineState
-        let boxPipeline: MTLRenderPipelineState
-        let boxVertexBuffer: MTLBuffer
-        let histogramOverlay: HistogramOverlay?
     }
 
     /// Metal-backed camera preview that renders CVPixelBuffers using the display link
@@ -55,10 +18,10 @@
 
         // MARK: - Metal State
 
-        private let device: MTLDevice
+        let device: MTLDevice
         private let commandQueue: MTLCommandQueue
         private let textureCache: CVMetalTextureCache
-        private let mtkView: MTKView
+        let mtkView: MTKView
 
         /// Overlay that draws detection labels (class name + confidence) above the Metal preview.
         private let labelOverlayView = DetectionLabelOverlayView()
@@ -68,15 +31,25 @@
 
         // Render pipelines
         private let cameraPipeline: MTLRenderPipelineState
-        private let boxPipeline: MTLRenderPipelineState
+        let boxPipeline: MTLRenderPipelineState
 
         /// Draws the live RGB + luminance histogram (GPU compute + draw, no readback). `nil`
         /// if its Metal pipelines could not be built; the preview then runs without it.
-        private let histogramOverlay: HistogramOverlay?
+        private let histogramOverlay: Histogram.Overlay?
+
+        /// The channel-gain filter: a compute pass that writes `camera × gain` into `gainTexture`,
+        /// which the preview and the histogram then both read. `nil` if the pipeline could not be
+        /// built — the preview then shows the unfiltered feed. The filter transforms pixels; the
+        /// histogram only measures them.
+        let channelGainPipeline: MTLComputePipelineState?
+
+        /// Destination for the channel-gain filter, reused across frames and resized to match the
+        /// camera texture. Touched only on the main thread inside `draw(in:)`.
+        var gainTexture: MTLTexture?
 
         /// Histogram appearance (channels, on-screen frame, opacity). Updated via
         /// `setHistogramConfig` from any thread, read in `draw`.
-        private let _histogramConfig = OSAllocatedUnfairLock<HistogramConfig>(initialState: .default)
+        private let _histogramConfig = OSAllocatedUnfairLock<Histogram.Config>(initialState: .default)
 
         /// Minimum spacing between histogram recomputes — the draw still reads the last bins
         /// every frame, so the overlay stays on screen at full rate while compute runs ~12fps.
@@ -89,15 +62,15 @@
         // Reusable vertex buffer for bounding box overlays (avoids per-frame allocation).
         // Each box is one quad (2 triangles = 6 vertices); 800 vertices ≈ 133 boxes.
         // `static` so `create()` sizes the buffer from the same source the draw path fills to.
-        private static let maxBoxVertices = 800
-        private let boxVertexBuffer: MTLBuffer
+        static let maxBoxVertices = 800
+        let boxVertexBuffer: MTLBuffer
 
         /// Bounding-box border thickness in points. The border is drawn as a rounded-rectangle
         /// ring in the fragment shader (Metal `.line` primitives are 1px hairlines with no width).
-        private let boxBorderWidth: CGFloat = 3
+        let boxBorderWidth: CGFloat = 3
 
         /// Bounding-box corner radius in points. 0 = sharp corners.
-        private let boxCornerRadius: CGFloat = 8
+        let boxCornerRadius: CGFloat = 8
 
         // MARK: - Frame State
 
@@ -119,6 +92,10 @@
 
         /// Whether the live histogram overlay is drawn. Written from any thread, read in `draw`.
         private let _histogramVisible = OSAllocatedUnfairLock<Bool>(initialState: false)
+
+        /// Per-channel RGBA gain applied to the live preview — and to the histogram sampling the same
+        /// pixels. `(1,1,1,1)` leaves the feed untouched. Written from any thread, read in `draw`.
+        let _channelGains = OSAllocatedUnfairLock<SIMD4<Float>>(initialState: .one)
 
         /// Dirty flag — set by enqueueFrame, cleared by draw. Prevents redundant draws.
         private let _needsDraw = OSAllocatedUnfairLock<Bool>(initialState: false)
@@ -162,74 +139,7 @@
 
         // MARK: - Init
 
-        /// Factory method — returns nil if Metal is unavailable.
-        static func create() -> MetalPreviewRenderer? {
-            guard let device = MTLCreateSystemDefaultDevice(),
-                let commandQueue = device.makeCommandQueue()
-            else {
-                return nil
-            }
-
-            var cache: CVMetalTextureCache?
-            let status = CVMetalTextureCacheCreate(
-                kCFAllocatorDefault,
-                nil,
-                device,
-                nil,
-                &cache
-            )
-            guard status == kCVReturnSuccess, let textureCache = cache else {
-                return nil
-            }
-
-            guard let library = try? device.makeDefaultLibrary(bundle: Bundle.module) else {
-                return nil
-            }
-
-            let cameraDescriptor = MTLRenderPipelineDescriptor()
-            cameraDescriptor.vertexFunction = library.makeFunction(name: "cameraVertex")
-            cameraDescriptor.fragmentFunction = library.makeFunction(name: "cameraFragment")
-            cameraDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-            guard let cameraPipeline = try? device.makeRenderPipelineState(descriptor: cameraDescriptor) else {
-                return nil
-            }
-
-            // Box pipeline with alpha blending
-            let boxDescriptor = MTLRenderPipelineDescriptor()
-            boxDescriptor.vertexFunction = library.makeFunction(name: "boxVertex")
-            boxDescriptor.fragmentFunction = library.makeFunction(name: "boxFragment")
-            boxDescriptor.colorAttachments[0].pixelFormat = .bgra8Unorm
-            boxDescriptor.colorAttachments[0].isBlendingEnabled = true
-            boxDescriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
-            boxDescriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
-            boxDescriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
-            boxDescriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
-            guard let boxPipeline = try? device.makeRenderPipelineState(descriptor: boxDescriptor) else {
-                return nil
-            }
-
-            let bufferSize = maxBoxVertices * MemoryLayout<BoxVertex>.stride
-            guard let boxVertexBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
-                return nil
-            }
-
-            // Optional: the preview still runs if the histogram pipelines fail to build.
-            let histogramOverlay = HistogramOverlay.create(device: device)
-
-            return MetalPreviewRenderer(
-                resources: Resources(
-                    device: device,
-                    commandQueue: commandQueue,
-                    textureCache: textureCache,
-                    cameraPipeline: cameraPipeline,
-                    boxPipeline: boxPipeline,
-                    boxVertexBuffer: boxVertexBuffer,
-                    histogramOverlay: histogramOverlay
-                )
-            )
-        }
-
-        private init(resources: Resources) {
+        init(resources: Resources) {
             self.device = resources.device
             self.commandQueue = resources.commandQueue
             self.textureCache = resources.textureCache
@@ -237,6 +147,7 @@
             self.boxPipeline = resources.boxPipeline
             self.boxVertexBuffer = resources.boxVertexBuffer
             self.histogramOverlay = resources.histogramOverlay
+            self.channelGainPipeline = resources.channelGainPipeline
 
             let mtkView = MTKView()
             mtkView.device = resources.device
@@ -466,8 +377,15 @@
         }
 
         /// Update the live histogram's channels, frame, and opacity.
-        func setHistogramConfig(_ config: HistogramConfig) {
+        func setHistogramConfig(_ config: Histogram.Config) {
             _histogramConfig.withLock { $0 = config }
+            markNeedsRedraw()
+        }
+
+        /// Set the per-channel RGBA gain applied to the live preview (and the histogram). `(1,1,1,1)`
+        /// restores the untouched feed.
+        func setChannelGains(_ gains: SIMD4<Float>) {
+            _channelGains.withLock { $0 = gains }
             markNeedsRedraw()
         }
 
@@ -481,7 +399,7 @@
 
         /// Current aspect-fill + zoom transform, used to place both boxes and labels.
         /// Read `aspectFillUniforms` on the main thread (where it is mutated).
-        private func currentOverlayTransform() -> OverlayTransform {
+        func currentOverlayTransform() -> OverlayTransform {
             let zoom = _visualZoom.withLock { $0 }
             return OverlayTransform(
                 uvScale: aspectFillUniforms.uvScale,
@@ -576,12 +494,18 @@
 
             guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
 
-            // Histogram compute runs before the render pass so the draw reads fresh bins.
-            // Encoded on the same command buffer; the draw step adds it over the frame below.
             let histogramVisible = _histogramVisible.withLock { $0 }
             let histogramConfig = _histogramConfig.withLock { $0 }
+            let channelGains = _channelGains.withLock { $0 }
+
+            // Apply the channel-gain filter once; the preview and the histogram both read its result,
+            // so the filter transforms pixels in one place and the histogram just measures them.
+            let sourceTexture = filteredTexture(from: frame.mtlTexture, gains: channelGains, in: commandBuffer)
+
+            // Histogram compute runs before the render pass so the draw reads fresh bins.
+            // Encoded on the same command buffer; the draw step adds it over the frame below.
             if histogramVisible {
-                maybeComputeHistogram(from: frame.mtlTexture, config: histogramConfig, in: commandBuffer)
+                maybeComputeHistogram(from: sourceTexture, config: histogramConfig, in: commandBuffer)
             }
 
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
@@ -595,7 +519,7 @@
             uniforms.zoomFactor = zoom.factor
             uniforms.zoomAnchor = SIMD2<Float>(zoom.anchorX, zoom.anchorY)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<AspectFillUniforms>.size, index: 0)
-            encoder.setFragmentTexture(frame.mtlTexture, index: 0)
+            encoder.setFragmentTexture(sourceTexture, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
 
             // 2. Draw bounding box overlays (skipped in `.centerDot` style — the dot is a
@@ -622,7 +546,7 @@
         /// inside `draw(in:)`, so `lastHistogramComputeTime` needs no lock.
         private func maybeComputeHistogram(
             from texture: MTLTexture,
-            config: HistogramConfig,
+            config: Histogram.Config,
             in commandBuffer: MTLCommandBuffer
         ) {
             guard let histogramOverlay else { return }
@@ -632,93 +556,5 @@
             histogramOverlay.encodeCompute(texture: texture, in: commandBuffer, config: config)
         }
 
-        // MARK: - Overlay Drawing
-
-        /// Writes one quad per box into the vertex buffer; the rounded, anti-aliased border
-        /// (thickness + corner radius) is computed per-pixel in the fragment shader.
-        private func drawOverlays(
-            _ overlays: [PhotoCaptureClient.OverlayRect],
-            encoder: MTLRenderCommandEncoder
-        ) {
-            encoder.setRenderPipelineState(boxPipeline)
-
-            // One quad (2 triangles = 6 vertices) per box.
-            let verticesPerBox = 6
-            let maxBoxes = Self.maxBoxVertices / verticesPerBox
-
-            let pointer = boxVertexBuffer.contents().bindMemory(
-                to: BoxVertex.self,
-                capacity: Self.maxBoxVertices
-            )
-
-            let transform = currentOverlayTransform()
-
-            let scale = Float(mtkView.contentScaleFactor)
-            let drawableWidth = Float(mtkView.drawableSize.width)
-            let drawableHeight = Float(mtkView.drawableSize.height)
-            guard drawableWidth > 0, drawableHeight > 0 else { return }
-            let borderPixels = Float(boxBorderWidth) * scale
-            // One pixel of padding so the anti-aliased outer edge isn't clipped by the quad.
-            let padPixels: Float = 1
-
-            var idx = 0
-            for index in 0..<min(overlays.count, maxBoxes) {
-                let overlay = overlays[index]
-                // Map texture space → screen-normalized (aspect-fill + zoom). Returns nil when the box
-                // is not fully inside the visible preview, so partially-cropped boxes are skipped.
-                guard let rect = visibleScreenRect(for: overlay, transform: transform) else {
-                    continue
-                }
-
-                // Box geometry in pixels.
-                let halfWidthPixels = rect.width * drawableWidth * 0.5
-                let halfHeightPixels = rect.height * drawableHeight * 0.5
-                let radiusPixels = min(Float(boxCornerRadius) * scale, min(halfWidthPixels, halfHeightPixels))
-
-                // Box center in Metal clip space (-1..1, bottom-left origin).
-                let centerX = (rect.minX + rect.width * 0.5) * 2.0 - 1.0
-                let centerY = 1.0 - (rect.minY + rect.height * 0.5) * 2.0
-
-                // Quad half-extent (box + AA padding) in clip space and matching local pixel coords.
-                let halfClipX = (halfWidthPixels + padPixels) / drawableWidth * 2.0
-                let halfClipY = (halfHeightPixels + padPixels) / drawableHeight * 2.0
-                let localX = halfWidthPixels + padPixels
-                let localY = halfHeightPixels + padPixels
-
-                let color = overlay.color
-                let halfSize = SIMD2<Float>(halfWidthPixels, halfHeightPixels)
-                let params = SIMD2<Float>(radiusPixels, borderPixels)
-
-                func addVertex(
-                    _ clipX: Float,
-                    _ clipY: Float,
-                    _ localPosX: Float,
-                    _ localPosY: Float
-                ) {
-                    pointer[idx] = BoxVertex(
-                        color: color,
-                        position: SIMD2<Float>(clipX, clipY),
-                        localPos: SIMD2<Float>(localPosX, localPosY),
-                        halfSize: halfSize,
-                        params: params
-                    )
-                    idx += 1
-                }
-
-                // Two triangles covering the padded box quad.
-                addVertex(centerX - halfClipX, centerY - halfClipY, -localX, -localY)
-                addVertex(centerX + halfClipX, centerY - halfClipY, localX, -localY)
-                addVertex(centerX - halfClipX, centerY + halfClipY, -localX, localY)
-                addVertex(centerX + halfClipX, centerY - halfClipY, localX, -localY)
-                addVertex(centerX + halfClipX, centerY + halfClipY, localX, localY)
-                addVertex(centerX - halfClipX, centerY + halfClipY, -localX, localY)
-            }
-
-            guard idx > 0 else { return }
-
-            encoder.setVertexBuffer(boxVertexBuffer, offset: 0, index: 0)
-            // Draw only the vertices actually written — boxes outside the visible frame are skipped.
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: idx)
-        }
     }
 #endif

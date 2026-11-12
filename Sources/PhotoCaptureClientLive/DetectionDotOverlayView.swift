@@ -23,7 +23,7 @@
     /// the geometry crisply, exactly like the bounding boxes and labels.
     final class DetectionDotOverlayView: UIView {
 
-        private enum Style {
+        enum Style {
             static let diameter: CGFloat = 16
             static let borderWidth: CGFloat = 2
             static let moveDuration: TimeInterval = 0.28
@@ -99,14 +99,14 @@
         }
 
         /// What triggered a relayout — new detection data vs. a re-projection of the existing data.
-        private enum RelayoutCause {
+        enum RelayoutCause {
             case detections  // fresh detection results: glide + advance the hold clock
             case transform  // pinch-zoom / layout / activation: snap, don't touch the hold clock
         }
 
         /// A fully-visible detection considered for the dot, with both an identity key (texture-space
         /// center, transform-invariant) and on-screen geometry.
-        private struct Candidate {
+        struct Candidate {
             /// Stable identity from the upstream tracker (`nil` when untracked).
             let trackID: UUID?
             let texCenter: SIMD2<Float>
@@ -136,7 +136,7 @@
 
         /// A 1€ low-pass filter (Casiez et al., CHI 2012): an adaptive cutoff trades jitter for lag —
         /// low cutoff (steady) kills jitter, higher cutoff (fast) cuts lag.
-        private struct OneEuroFilter {
+        struct OneEuroFilter {
             let minCutoff: Float
             let beta: Float
             var derivativeCutoff: Float = 1
@@ -198,32 +198,32 @@
         /// (`true` only for `.centerDot`).
         private var isActive: Bool = false
         /// Whether the dot is currently shown (used to decide fade-in vs. glide).
-        private var wasShown: Bool = false
+        var wasShown: Bool = false
 
         // Cross-frame tracking state.
         /// The tracked target's stable track ID — the primary identity key (when present).
-        private var lastTargetTrackID: UUID?
-        private var lastTargetTexCenter: SIMD2<Float>?
+        var lastTargetTrackID: UUID?
+        var lastTargetTexCenter: SIMD2<Float>?
         /// The tracked target's last sampled depth (metres); `nil` if it had no depth.
-        private var lastTargetDepth: Float?
+        var lastTargetDepth: Float?
         /// The tracked target's last screen-space center-proximity.
-        private var lastTargetProximity: Float = 0
-        private var lastSeenTime: CFTimeInterval = 0
+        var lastTargetProximity: Float = 0
+        var lastSeenTime: CFTimeInterval = 0
 
         // Per-axis 1€ smoothing of the selected object's center (same-object motion only).
-        private var smootherX = OneEuroFilter(
+        var smootherX = OneEuroFilter(
             minCutoff: Tuning.smoothingMinCutoff,
             beta: Tuning.smoothingBeta
         )
-        private var smootherY = OneEuroFilter(
+        var smootherY = OneEuroFilter(
             minCutoff: Tuning.smoothingMinCutoff,
             beta: Tuning.smoothingBeta
         )
 
         private var overlays: [PhotoCaptureClient.OverlayRect] = []
-        private var overlayTransform = OverlayTransform()
+        var overlayTransform = OverlayTransform()
 
-        private let dot: UIView = {
+        let dot: UIView = {
             let view = UIView(frame: CGRect(x: 0, y: 0, width: Style.diameter, height: Style.diameter))
             view.layer.cornerRadius = Style.diameter / 2
             view.layer.borderWidth = Style.borderWidth
@@ -473,123 +473,6 @@
                 }
             }
             return best
-        }
-
-        private func apply(
-            _ candidate: Candidate,
-            isSwitch: Bool,
-            cause: RelayoutCause,
-            now: CFTimeInterval,
-            size: CGSize
-        ) {
-            dot.backgroundColor = color(from: candidate.color)
-            let rawPoint = candidate.screenPoint
-
-            if !wasShown {
-                // Appearing: place at the target and fade in (no slide from a stale position).
-                resetSmoother(to: candidate.screenCenter, at: now)
-                dot.center = rawPoint
-                wasShown = true
-                UIView.animate(withDuration: Style.fadeDuration) { self.dot.alpha = 1 }
-            } else if cause == .detections {
-                if isSwitch {
-                    // Switched to a different object — reset the smoother and glide cleanly to it.
-                    resetSmoother(to: candidate.screenCenter, at: now)
-                    UIView.animate(
-                        withDuration: Style.moveDuration,
-                        delay: 0,
-                        options: [.beginFromCurrentState, .curveEaseInOut]
-                    ) {
-                        self.dot.center = rawPoint
-                    }
-                } else {
-                    // Same object — damp residual jitter with the 1€ filter, then glide.
-                    let point = smoothedPoint(candidate.screenCenter, at: now, size: size)
-                    UIView.animate(
-                        withDuration: Style.moveDuration,
-                        delay: 0,
-                        options: [.beginFromCurrentState, .curveEaseInOut]
-                    ) {
-                        self.dot.center = point
-                    }
-                }
-            } else {
-                // Transform/layout re-projection — snap so the dot tracks pinch-zoom crisply.
-                resetSmoother(to: candidate.screenCenter, at: now)
-                dot.center = rawPoint
-            }
-
-            lastTargetTexCenter = candidate.texCenter
-            lastTargetTrackID = candidate.trackID
-            lastTargetDepth = candidate.depth
-            lastTargetProximity = candidate.proximity
-            if cause == .detections {
-                lastSeenTime = now
-            }
-        }
-
-        private func resetSmoother(
-            to center: SIMD2<Float>,
-            at time: CFTimeInterval
-        ) {
-            smootherX.reset(to: center.x, at: time)
-            smootherY.reset(to: center.y, at: time)
-        }
-
-        private func smoothedPoint(
-            _ center: SIMD2<Float>,
-            at time: CFTimeInterval,
-            size: CGSize
-        ) -> CGPoint {
-            let smoothedX = smootherX.filter(center.x, at: time)
-            let smoothedY = smootherY.filter(center.y, at: time)
-            return CGPoint(x: CGFloat(smoothedX) * size.width, y: CGFloat(smoothedY) * size.height)
-        }
-
-        /// Keep a held dot glued to its (currently off-candidate) object by re-projecting the last
-        /// known texture-space center through the live transform, so a pinch-zoom during a hold still
-        /// moves the dot instead of freezing it in screen pixels.
-        private func holdInPlace(size: CGSize) {
-            guard let texCenter = lastTargetTexCenter else { return }
-            dot.center = projectedPoint(texCenter, size: size)
-        }
-
-        /// Project a texture-space point to view points through the aspect-fill + zoom transform —
-        /// the same mapping as `visibleScreenRect`, but for a single point (no full-box visibility
-        /// gate, since a held center may sit outside `[0, 1]`).
-        private func projectedPoint(
-            _ texCenter: SIMD2<Float>,
-            size: CGSize
-        ) -> CGPoint {
-            // A point is a zero-size box, so it shares `screenRect`'s aspect-fill + zoom mapping.
-            let rect = screenRect(
-                minX: texCenter.x,
-                minY: texCenter.y,
-                width: 0,
-                height: 0,
-                transform: overlayTransform
-            )
-            return CGPoint(x: CGFloat(rect.minX) * size.width, y: CGFloat(rect.minY) * size.height)
-        }
-
-        private func hideDot() {
-            lastTargetTexCenter = nil
-            lastTargetTrackID = nil
-            guard wasShown else {
-                dot.alpha = 0
-                return
-            }
-            wasShown = false
-            UIView.animate(withDuration: Style.fadeDuration) { self.dot.alpha = 0 }
-        }
-
-        private func color(from rgba: SIMD4<Float>) -> UIColor {
-            UIColor(
-                red: CGFloat(rgba.x),
-                green: CGFloat(rgba.y),
-                blue: CGFloat(rgba.z),
-                alpha: CGFloat(rgba.w)
-            )
         }
     }
 #endif

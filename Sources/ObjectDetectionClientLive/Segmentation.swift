@@ -51,7 +51,8 @@ actor SegmentationEngine {
                 "SEG \(objects.count) obj ["
                     + objects.map { "\($0.label) c=\(String(format: "%.2f", $0.confidence))" }
                     .joined(separator: ", ")
-                    + "] in \(Int(inferenceMs))ms")
+                    + "] in \(Int(inferenceMs))ms"
+            )
             return ObjectDetectionClient.SegmentationResult(
                 objects: objects,
                 inferenceTimeMs: inferenceMs,
@@ -254,7 +255,8 @@ enum SegmentationDecoder {
             let cropHeight = max(1, Int((box.height * Float(height)).rounded()))
             guard
                 let crop = source.cropping(
-                    to: CGRect(x: x1, y: y1, width: cropWidth, height: cropHeight))
+                    to: CGRect(x: x1, y: y1, width: cropWidth, height: cropHeight)
+                )
             else {
                 return nil
             }
@@ -270,7 +272,8 @@ enum SegmentationDecoder {
                         bitsPerComponent: 8,
                         bytesPerRow: bytesPerRow,
                         space: CGColorSpaceCreateDeviceRGB(),
-                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                    )
                 else { return false }
                 // Flip so buffer row 0 is the image's top row, matching the top-left mask space.
                 context.translateBy(x: 0, y: CGFloat(cropHeight))
@@ -352,7 +355,8 @@ enum SegmentationDecoder {
                         bitsPerComponent: 8,
                         bytesPerRow: bytesPerRow,
                         space: CGColorSpaceCreateDeviceRGB(),
-                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                    )
                 else { return nil }
                 return context.makeImage()
             }

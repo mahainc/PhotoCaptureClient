@@ -6,7 +6,7 @@
 /// This decoupled per-axis model is a deliberate, documented simplification of BoT-SORT's 8-D
 /// `[xc, yc, w, h, …]` state with a *diagonal* covariance — sufficient for a handful of large objects
 /// at ~3 fps, and far cheaper than a coupled filter. (Clean-room from the SORT/BoT-SORT papers; see
-/// `ObjectTrackingAttribution`.)
+/// `Attribution`.)
 struct ScalarKalman {
     private(set) var value: Float
     private var velocity: Float = 0

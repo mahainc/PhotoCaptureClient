@@ -43,6 +43,21 @@ fragment float4 cameraFragment(CameraVertexOut in [[stage_in]],
     return cameraTexture.sample(texSampler, in.texCoord);
 }
 
+// MARK: - Channel-Gain Filter (pure pixel transform)
+
+/// Per-channel RGBA gain, applied once to produce the filtered texture that both the preview and
+/// the histogram then read. `1` leaves a channel unchanged. This is the filter; measuring the
+/// result is the histogram's separate job.
+kernel void applyChannelGain(texture2d<float, access::read> source [[texture(0)]],
+                             texture2d<float, access::write> destination [[texture(1)]],
+                             constant float4& gain [[buffer(0)]],
+                             uint2 gid [[thread_position_in_grid]]) {
+    if (gid.x >= source.get_width() || gid.y >= source.get_height()) {
+        return;
+    }
+    destination.write(source.read(gid) * gain, gid);
+}
+
 // MARK: - Bounding Box Overlay Rendering
 
 // `color` (16-byte aligned) is first so the layout has no padding (must match the Swift struct).

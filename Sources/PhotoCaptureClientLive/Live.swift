@@ -60,6 +60,9 @@ extension PhotoCaptureClient: DependencyKey {
             setHistogramConfig: { config in
                 Task { await actor.setHistogramConfig(config) }
             },
+            setPreviewChannelGains: { gains in
+                Task { await actor.setChannelGains(gains) }
+            },
             setPreviewPerformanceMode: { mode in
                 await actor.setPreviewPerformanceMode(mode)
             }

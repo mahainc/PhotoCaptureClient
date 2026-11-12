@@ -100,7 +100,7 @@ public struct MultiCamClient: Sendable {
 
     /// Adjust the live histogram's channels, on-screen frame, and opacity. Takes effect on the
     /// next composited frame; independent of `setHistogramVisible`.
-    public var setHistogramConfig: @Sendable (_ config: HistogramConfig) async -> Void = { _ in }
+    public var setHistogramConfig: @Sendable (_ config: Histogram.Config) async -> Void = { _ in }
 
     // MARK: - Recording
 

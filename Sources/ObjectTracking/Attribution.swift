@@ -17,7 +17,7 @@
 ///   © 2022 Nir Aharon).
 ///
 /// MIT requires retaining the upstream copyright/permission notices; this file serves that purpose.
-public enum ObjectTrackingAttribution {
+public enum Attribution {
     public static let notice = """
         ObjectTracking — clean-room Swift reimplementation of SORT / ByteTrack / OC-SORT / BoT-SORT \
         from their papers and MIT-licensed reference repositories. Not derived from boxmot (AGPL-3.0). \

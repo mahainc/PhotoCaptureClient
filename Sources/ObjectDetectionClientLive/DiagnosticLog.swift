@@ -23,19 +23,19 @@ final class DiagnosticLog: @unchecked Sendable {
         // whole body compiles out of release. The on-device file lets a `devicectl`-launched debug
         // session be pulled back and inspected, where plain `print` does not survive.
         #if DEBUG
-        print("[YOLO] \(message)")
-        guard let fileURL else { return }
-        let line = "\(formatter.string(from: Date())) \(message)\n"
-        lock.lock()
-        defer { lock.unlock() }
-        guard let data = line.data(using: .utf8) else { return }
-        if let handle = try? FileHandle(forWritingTo: fileURL) {
-            defer { try? handle.close() }
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: data)
-        } else {
-            try? data.write(to: fileURL)
-        }
+            print("[YOLO] \(message)")
+            guard let fileURL else { return }
+            let line = "\(formatter.string(from: Date())) \(message)\n"
+            lock.lock()
+            defer { lock.unlock() }
+            guard let data = line.data(using: .utf8) else { return }
+            if let handle = try? FileHandle(forWritingTo: fileURL) {
+                defer { try? handle.close() }
+                _ = try? handle.seekToEnd()
+                try? handle.write(contentsOf: data)
+            } else {
+                try? data.write(to: fileURL)
+            }
         #endif
     }
 }

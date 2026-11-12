@@ -1,7 +1,7 @@
 // MARK: - Multi-Object Tracker
 
 /// Track-by-detection associator combining, clean-room from their papers (see
-/// `ObjectTrackingAttribution`):
+/// `Attribution`):
 /// - **SORT** — per-axis constant-velocity Kalman prediction + greedy IoU matching;
 /// - **ByteTrack** — two-stage association that recovers momentarily low-confidence boxes;
 /// - **OC-SORT** — Observation-Centric Momentum (velocity-direction cost), Re-Update (virtual

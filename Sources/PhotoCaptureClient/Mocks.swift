@@ -60,6 +60,7 @@ extension PhotoCaptureClient {
         setOverlayStyle: { _ in },
         setHistogramVisible: { _ in },
         setHistogramConfig: { _ in },
+        setPreviewChannelGains: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 
@@ -102,6 +103,7 @@ extension PhotoCaptureClient {
         setOverlayStyle: { _ in },
         setHistogramVisible: { _ in },
         setHistogramConfig: { _ in },
+        setPreviewChannelGains: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 
@@ -143,6 +145,7 @@ extension PhotoCaptureClient {
         setOverlayStyle: { _ in },
         setHistogramVisible: { _ in },
         setHistogramConfig: { _ in },
+        setPreviewChannelGains: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 }
