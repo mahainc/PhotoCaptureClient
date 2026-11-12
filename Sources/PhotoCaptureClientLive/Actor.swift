@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import CoreMedia
 import Foundation
+import HistogramKit
 import ImageIO
 import PhotoCaptureClient
 import os
@@ -1040,6 +1041,14 @@ actor PhotoCaptureClientActor {
 
         func setOverlayStyle(_ style: PhotoCaptureClient.OverlayStyle) {
             metalRenderer?.setOverlayStyle(style)
+        }
+
+        func setHistogramVisible(_ visible: Bool) {
+            metalRenderer?.setHistogramVisible(visible)
+        }
+
+        func setHistogramConfig(_ config: HistogramConfig) {
+            metalRenderer?.setHistogramConfig(config)
         }
     #endif
 

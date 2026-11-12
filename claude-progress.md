@@ -2,17 +2,17 @@
 
 ## Current Verified State
 
-- Last updated: 2026-10-06
+- Last updated: 2026-11-12
 - Repo root: `/Users/thanhhaikhong/Documents/PhotoCaptureClient`
 - Standard startup path: `./init.sh`
 - Standard verification path: `xcode-build --scheme PhotoCaptureClient-Package --platform ios`
-- Last verified commit: 3b2fdb9 (uncommitted working changes for gestures-001 on top)
-- Last verification result: PASS — `xcode-build … --platform ios` BUILD SUCCEEDED (level 1) 2026-10-06, baseline + gestures-001
-- Features passing: 6 / 7 -- preview-001, detection-001, detection-002/003/004 passing; gestures-001 implemented+compiles, chờ device validation; detection-005 not_started
-- Highest-priority unfinished feature: gestures-001 (chờ manual device validation); kế đó detection-005 (param-type nợ structural)
-- Blockers: none (gestures-001 chỉ chờ user test trên thiết bị thật)
-- Next best step: user validate gestures-001 trên device (tap focus góc, pinch clamp, switch reset) → mark passing; sau đó detection-005
-- What must not change while doing it: the two-beat camera flow (preview full-rate, detection throttled ~3fps); public API PhotoCaptureClient không đổi
+- Last verified commit: 5511891 (uncommitted working changes for histogram-001 + gestures-001 on top)
+- Last verification result: PASS — `xcode-build … --platform ios` BUILD SUCCEEDED (level 1) 2026-11-12, baseline + histogram-001 (probe-pass x3)
+- Features passing: 6 / 8 -- preview-001, detection-001, detection-002/003/004 passing; gestures-001 + histogram-001 implemented+compiles, chờ device validation; detection-005 not_started
+- Highest-priority unfinished feature: histogram-001 (active, chờ device validation); gestures-001 cũng chờ device; kế đó detection-005
+- Blockers: none (histogram-001 và gestures-001 chỉ chờ user test trên thiết bị thật)
+- Next best step: user validate histogram-001 trên device (bật histogram, kiểm 4 kênh realtime trên preview ảnh + video, không tụt frame) → mark passing; rồi gestures-001; rồi detection-005
+- What must not change while doing it: the two-beat camera flow (preview full-rate, detection throttled ~3fps); public API PhotoCaptureClient/MultiCamClient chỉ THÊM setHistogramVisible, không đổi cái cũ
 
 ## Known Issues
 
@@ -73,6 +73,20 @@
      five sessions belongs under Decisions Made or Known Issues, which are never trimmed.
      Every session reads this file at startup, so it is the one artifact whose length has
      to stay bounded. -->
+
+### Session 003 -- 2026-11-12
+
+- Goal: đưa live Histogram (RGB + Luminance) lên preview, realtime, dùng cho cả chụp ảnh và quay video.
+- Completed: target mới `HistogramKit` (Metal thuần, tái dùng) — `Histogram.metal` (compute accumulate R/G/B/Luma + reduceMax + panel/bars render), `HistogramOverlay.swift` (encodeCompute/encodeDraw, bins ở lại GPU, KHÔNG readback trên hot path), `HistogramConfig.swift`, `HistogramData.swift` (`HistogramBins` cho test). Nối vào `MetalPreviewRenderer.draw` (compute trước render pass, draw sau box, throttle ~12fps) và `MultiCamCompositor.draw` (primary camera texture, chỉ vẽ trên preview — KHÔNG trên pass recording nên video xuất ra sạch). API mới `setHistogramVisible` trên PhotoCaptureClient + MultiCamClient (interface/mocks/Live/Actor); MultiCam persist qua restart. Package.swift thêm target + 2 dep edge.
+- Verification run: `xcode-build --platform ios` BUILD SUCCEEDED (probe-pass x3, level 1). Level 2 (`swift-test`) vẫn chặn (gói iOS-only, không scheme iOS — xem Known Issues); `HistogramOverlay.readback()` là hook test chờ scheme. Level 3 (device) chưa chạy — cần user.
+- clean-code: load pack; stamp design (late) cho 3 file HistogramKit; check + review prepare. Code mới đã sửa mọi finding thật: F1 tier-A `makeRenderPipeline`→`RenderPipelineSpec`; F3 bỏ bool `additive`; N1 `HistogramData`→`HistogramBins`; G26 force-unwrap→guard; G33 boundary +1/-1→`ceilDiv`. Gate đầy đủ: **BYPASS** — scope bị chi phối bởi nợ tier-A **pre-existing** trong các file lớn chỉnh sửa (G4 @unchecked Sendable, C1 "Camera pipeline", G25 0.01 ở PiP pinch), theo tiền lệ hoãn-gate-tới-tích-hợp (gestures-001/detection-002). KHÔNG spawn 29-shard reviewer vì phần lớn là nợ có sẵn repo đã quyết hoãn.
+- Commit: (chưa commit — user chưa yêu cầu).
+- Files updated: xem feature_list.json histogram-001.evidence.
+- Thêm (theo yêu cầu user): `setHistogramConfig(HistogramConfig)` cho cả hai client để chỉnh channels/vị trí (frame)/opacity realtime. Interface target nay phụ thuộc HistogramKit (kiểu config thuần Foundation). MetalPreviewRenderer giữ config trong `OSAllocatedUnfairLock`; MultiCam persist config qua restart.
+- Theo yêu cầu "refactor sạch toàn bộ": dọn ~48 clean-code finding qua 5 vòng review (mỗi vòng dedup lại sinh finding mới — treadmill trên file Metal lớn, hội tụ dần 125→0). Kết quả **`clean-code gate`: CC=PASS** (review complete round 5, seals gánh 1846 pair). Refactor bảo toàn hành vi, `xcode-build --platform ios` BUILD SUCCEEDED nhiều lần. Chạm MultiCamCompositor (encodeViewport/encodeScene/renderComposite + RenderTarget/BorderStyle/Scene, makeTextureCache/makeTexture/makeRenderTarget, PiPGestureCoordinator base, named constants), MultiCamLive/Actor (collectCameraSets/sortedByPreference, startSession helpers), MetalPreviewRenderer (Resources struct, pinToBounds/observeMemoryWarnings/markNeedsRedraw, static maxBoxVertices), HistogramOverlay (Resources struct).
+- **BREAKING API**: `MultiCamClient.setPiPBorder(width:r:g:b:)` → `setPiPBorder(width:color:)` (gom r/g/b thành `SIMD4<Float>`, có alpha thật — sửa luôn C2 doc mismatch). App tiêu thụ (Lensy) phải cập nhật call site khi bump version.
+- Known risks: histogram-001 chưa validate trên device; MultiCam feed histogram = fullscreen/primary camera (chưa chọn được camera khác); setPiPBorder breaking → cần cập nhật Lensy.
+- Next best step: user validate histogram-001 trên device → mark passing.
 
 ### Session 002 -- 2026-10-06
 

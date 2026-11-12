@@ -54,9 +54,11 @@ extension MultiCamClient {
 		setStabilization: { _, _ in },
 		setCameraOrder: { _ in },
 		setTorch: { _ in },
-		setPiPBorder: { _, _, _, _ in },
+		setPiPBorder: { _, _ in },
 		setPiPOverlayPosition: { _, _ in },
 		setPiPGestureCallbacks: { _ in },
+		setHistogramVisible: { _ in },
+		setHistogramConfig: { _ in },
 		startRecording: { _ in },
 		pauseRecording: {},
 		resumeRecording: {},
@@ -94,9 +96,11 @@ extension MultiCamClient {
 		setStabilization: { _, _ in },
 		setCameraOrder: { _ in },
 		setTorch: { _ in },
-		setPiPBorder: { _, _, _, _ in },
+		setPiPBorder: { _, _ in },
 		setPiPOverlayPosition: { _, _ in },
 		setPiPGestureCallbacks: { _ in },
+		setHistogramVisible: { _ in },
+		setHistogramConfig: { _ in },
 		startRecording: { _ in
 			try await Task.sleep(nanoseconds: MockConstants.shortDelayNanoseconds)
 		},
@@ -165,9 +169,11 @@ extension MultiCamClient {
 		setStabilization: { _, _ in },
 		setCameraOrder: { _ in },
 		setTorch: { _ in },
-		setPiPBorder: { _, _, _, _ in },
+		setPiPBorder: { _, _ in },
 		setPiPOverlayPosition: { _, _ in },
 		setPiPGestureCallbacks: { _ in },
+		setHistogramVisible: { _ in },
+		setHistogramConfig: { _ in },
 		startRecording: { _ in
 			throw MultiCamClient.Error.sessionNotRunning
 		},

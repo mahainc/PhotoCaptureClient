@@ -54,6 +54,12 @@ extension PhotoCaptureClient: DependencyKey {
             setOverlayStyle: { style in
                 Task { await actor.setOverlayStyle(style) }
             },
+            setHistogramVisible: { visible in
+                Task { await actor.setHistogramVisible(visible) }
+            },
+            setHistogramConfig: { config in
+                Task { await actor.setHistogramConfig(config) }
+            },
             setPreviewPerformanceMode: { mode in
                 await actor.setPreviewPerformanceMode(mode)
             }

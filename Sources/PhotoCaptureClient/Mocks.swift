@@ -58,6 +58,8 @@ extension PhotoCaptureClient {
         updateOverlays: { _ in },
         setLabelsVisible: { _ in },
         setOverlayStyle: { _ in },
+        setHistogramVisible: { _ in },
+        setHistogramConfig: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 
@@ -98,6 +100,8 @@ extension PhotoCaptureClient {
         updateOverlays: { _ in },
         setLabelsVisible: { _ in },
         setOverlayStyle: { _ in },
+        setHistogramVisible: { _ in },
+        setHistogramConfig: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 
@@ -137,6 +141,8 @@ extension PhotoCaptureClient {
         updateOverlays: { _ in },
         setLabelsVisible: { _ in },
         setOverlayStyle: { _ in },
+        setHistogramVisible: { _ in },
+        setHistogramConfig: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 }

@@ -2,8 +2,8 @@
   "project": "PhotoCaptureClient",
   "schema_version": "1.0",
   "generated_by": "harness-init 1.5",
-  "last_updated": "2026-10-06",
-  "active_feature": "gestures-001",
+  "last_updated": "2026-11-12",
+  "active_feature": "histogram-001",
   "rules": {
     "single_active_feature": true,
     "passing_requires_evidence": true,
@@ -158,6 +158,27 @@
       ],
       "evidence": [],
       "notes": "Nợ structural: screenRect(minX:minY:width:height:transform:) và visibleScreenRect(...) có 5 tham số → F1 tier-A. visibleScreenRect vốn đã 5 tham số từ trước (pre-existing), screenRect kế thừa shape khi tách ở detection-002. Gate của 002 là BYPASS vì finding này. Fix: gom 4 toạ độ box normalized thành 1 value type (vd NormalizedRect) để các mapping nhận 2 tham số (box + transform). Chạm DetectionLabelOverlayView.swift + call site."
+    },
+    {
+      "id": "histogram-001",
+      "priority": 2,
+      "area": "preview",
+      "title": "Live histogram RGB + Luminance trên preview (ảnh + video)",
+      "user_visible_behavior": "Bật/tắt một histogram RGB + độ sáng (luminance) phủ góc dưới preview, cập nhật realtime theo live feed làm công cụ tự chỉnh exposure/ánh sáng. Dùng được cho cả chụp ảnh (PhotoCaptureClient) và quay video (MultiCamClient). Read-only — không đổi ảnh/video xuất ra.",
+      "status": "in_progress",
+      "dependencies": ["preview-001"],
+      "verification": [
+        "xcode-build --scheme PhotoCaptureClient-Package --platform ios: BUILD SUCCEEDED (level 1)",
+        "Device test (level 3): bật histogram, xoay máy vào vùng sáng/tối → 4 kênh cập nhật realtime mượt; xác nhận trên cả preview ảnh và preview video; preview không tụt frame; tắt = không còn chi phí"
+      ],
+      "evidence": [
+        "xcode-build --platform ios: BUILD SUCCEEDED (probe-pass x3, 0 lỗi sau 1 fix colorAttachments optional)",
+        "Target mới HistogramKit (Metal thuần): Histogram.metal (compute accumulate R/G/B/Luma + reduceMax + panel/bars render), HistogramOverlay.swift (encodeCompute/encodeDraw, không readback trên hot path), HistogramConfig.swift, HistogramData.swift (HistogramBins readback cho test)",
+        "Nối vào MetalPreviewRenderer.draw (compute trước render pass, draw sau box, throttle ~12fps) + MultiCamCompositor.draw (primary camera texture, chỉ vẽ trên preview, KHÔNG trên pass recording)",
+        "API mới setHistogramVisible + setHistogramConfig(HistogramConfig) trên PhotoCaptureClient + MultiCamClient (interface/mocks/Live/Actor); interface target phụ thuộc HistogramKit cho kiểu config; MultiCam persist cả visible lẫn config qua restart",
+        "clean-code: code mới HistogramKit đã sửa mọi finding thật (F1 tier-A makeRenderPipeline→RenderPipelineSpec; F3 bỏ bool additive; N1 HistogramData→HistogramBins; G26 force-unwrap→guard; G33 boundary→ceilDiv). Gate đầy đủ: BYPASS — scope bị chi phối bởi nợ tier-A pre-existing trong các file lớn chỉnh sửa (G4 @unchecked Sendable, C1, G25 0.01), theo tiền lệ hoãn-tới-tích-hợp (như gestures-001/detection-002)"
+      ],
+      "notes": "IMPLEMENTATION COMPLETE, compile iOS PASS — chờ device validation (level 3). Quyết định kiến trúc (user chốt): target HistogramKit tái dùng cho cả single-camera lẫn multicam; render bằng Metal (không UIKit/CAShapeLayer) để bins ở lại GPU, không readback/không main-thread trên hot path. Giữ bất biến hai-nhịp: compute throttle ~12fps, không chạm nhịp detection. User chỉnh được channels/vị trí (frame)/opacity qua setHistogramConfig (HistogramConfig: channels, frame normalized, barOpacity, panelOpacity, sampleStride). readback() là hook test (level-2) — chưa có scheme iOS để chạy."
     }
   ]
 }

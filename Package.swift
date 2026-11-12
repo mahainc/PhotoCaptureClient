@@ -4,7 +4,7 @@ import PackageDescription
 let package = Package(
     name: "PhotoCaptureClient",
     platforms: [
-        .iOS(.v17),
+        .iOS(.v17)
     ],
     products: [
         .singleTargetLibrary("PhotoCaptureClient"),
@@ -14,6 +14,7 @@ let package = Package(
         .singleTargetLibrary("ObjectTracking"),
         .singleTargetLibrary("MultiCamClient"),
         .singleTargetLibrary("MultiCamClientLive"),
+        .singleTargetLibrary("HistogramKit"),
     ],
     dependencies: [
         .package(
@@ -25,7 +26,8 @@ let package = Package(
         .target(
             name: "PhotoCaptureClient",
             dependencies: [
-                .product(name: "ComposableArchitecture", package: "swift-composable-architecture")
+                .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
+                "HistogramKit",
             ]
         ),
         .target(
@@ -33,6 +35,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 "PhotoCaptureClient",
+                "HistogramKit",
             ],
             resources: [
                 .process("Shaders.metal")
@@ -70,6 +73,7 @@ let package = Package(
             dependencies: [
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 "PhotoCaptureClient",
+                "HistogramKit",
             ]
         ),
         .target(
@@ -78,6 +82,7 @@ let package = Package(
                 .product(name: "ComposableArchitecture", package: "swift-composable-architecture"),
                 "MultiCamClient",
                 "PhotoCaptureClient",
+                "HistogramKit",
             ],
             resources: [
                 .process("Shaders.metal")
@@ -85,6 +90,15 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("Metal"),
                 .linkedFramework("MetalKit"),
+            ]
+        ),
+        .target(
+            name: "HistogramKit",
+            resources: [
+                .process("Histogram.metal")
+            ],
+            linkerSettings: [
+                .linkedFramework("Metal")
             ]
         ),
         .testTarget(

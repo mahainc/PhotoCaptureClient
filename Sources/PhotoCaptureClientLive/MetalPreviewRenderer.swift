@@ -2,6 +2,7 @@
     import UIKit
     @preconcurrency import MetalKit
     @preconcurrency import AVFoundation
+    import HistogramKit
     import PhotoCaptureClient
     import os
 
@@ -37,6 +38,17 @@
         let mtlTexture: MTLTexture
     }
 
+    /// The Metal objects the renderer owns, grouped so the factory hands them to `init` as one value.
+    private struct Resources {
+        let device: MTLDevice
+        let commandQueue: MTLCommandQueue
+        let textureCache: CVMetalTextureCache
+        let cameraPipeline: MTLRenderPipelineState
+        let boxPipeline: MTLRenderPipelineState
+        let boxVertexBuffer: MTLBuffer
+        let histogramOverlay: HistogramOverlay?
+    }
+
     /// Metal-backed camera preview that renders CVPixelBuffers using the display link
     /// and supports bounding box overlay drawing for object detection results.
     final class MetalPreviewRenderer: UIView, @unchecked Sendable {
@@ -58,9 +70,26 @@
         private let cameraPipeline: MTLRenderPipelineState
         private let boxPipeline: MTLRenderPipelineState
 
+        /// Draws the live RGB + luminance histogram (GPU compute + draw, no readback). `nil`
+        /// if its Metal pipelines could not be built; the preview then runs without it.
+        private let histogramOverlay: HistogramOverlay?
+
+        /// Histogram appearance (channels, on-screen frame, opacity). Updated via
+        /// `setHistogramConfig` from any thread, read in `draw`.
+        private let _histogramConfig = OSAllocatedUnfairLock<HistogramConfig>(initialState: .default)
+
+        /// Minimum spacing between histogram recomputes — the draw still reads the last bins
+        /// every frame, so the overlay stays on screen at full rate while compute runs ~12fps.
+        private let histogramComputeInterval: CFTimeInterval = 1.0 / 12.0
+
+        /// Timestamp of the last histogram compute. Read and written only on the main thread
+        /// inside `draw(in:)`.
+        private var lastHistogramComputeTime: CFTimeInterval = 0
+
         // Reusable vertex buffer for bounding box overlays (avoids per-frame allocation).
         // Each box is one quad (2 triangles = 6 vertices); 800 vertices ≈ 133 boxes.
-        private let maxBoxVertices = 800
+        // `static` so `create()` sizes the buffer from the same source the draw path fills to.
+        private static let maxBoxVertices = 800
         private let boxVertexBuffer: MTLBuffer
 
         /// Bounding-box border thickness in points. The border is drawn as a rounded-rectangle
@@ -87,6 +116,9 @@
         private let _overlayStyle = OSAllocatedUnfairLock<PhotoCaptureClient.OverlayStyle>(
             initialState: .boxes
         )
+
+        /// Whether the live histogram overlay is drawn. Written from any thread, read in `draw`.
+        private let _histogramVisible = OSAllocatedUnfairLock<Bool>(initialState: false)
 
         /// Dirty flag — set by enqueueFrame, cleared by draw. Prevents redundant draws.
         private let _needsDraw = OSAllocatedUnfairLock<Bool>(initialState: false)
@@ -154,7 +186,6 @@
                 return nil
             }
 
-            // Camera pipeline
             let cameraDescriptor = MTLRenderPipelineDescriptor()
             cameraDescriptor.vertexFunction = library.makeFunction(name: "cameraVertex")
             cameraDescriptor.fragmentFunction = library.makeFunction(name: "cameraFragment")
@@ -177,38 +208,38 @@
                 return nil
             }
 
-            let bufferSize = 800 * MemoryLayout<BoxVertex>.stride
+            let bufferSize = maxBoxVertices * MemoryLayout<BoxVertex>.stride
             guard let boxVertexBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared) else {
                 return nil
             }
 
+            // Optional: the preview still runs if the histogram pipelines fail to build.
+            let histogramOverlay = HistogramOverlay.create(device: device)
+
             return MetalPreviewRenderer(
-                device: device,
-                commandQueue: commandQueue,
-                textureCache: textureCache,
-                cameraPipeline: cameraPipeline,
-                boxPipeline: boxPipeline,
-                boxVertexBuffer: boxVertexBuffer
+                resources: Resources(
+                    device: device,
+                    commandQueue: commandQueue,
+                    textureCache: textureCache,
+                    cameraPipeline: cameraPipeline,
+                    boxPipeline: boxPipeline,
+                    boxVertexBuffer: boxVertexBuffer,
+                    histogramOverlay: histogramOverlay
+                )
             )
         }
 
-        private init(
-            device: MTLDevice,
-            commandQueue: MTLCommandQueue,
-            textureCache: CVMetalTextureCache,
-            cameraPipeline: MTLRenderPipelineState,
-            boxPipeline: MTLRenderPipelineState,
-            boxVertexBuffer: MTLBuffer
-        ) {
-            self.device = device
-            self.commandQueue = commandQueue
-            self.textureCache = textureCache
-            self.cameraPipeline = cameraPipeline
-            self.boxPipeline = boxPipeline
-            self.boxVertexBuffer = boxVertexBuffer
+        private init(resources: Resources) {
+            self.device = resources.device
+            self.commandQueue = resources.commandQueue
+            self.textureCache = resources.textureCache
+            self.cameraPipeline = resources.cameraPipeline
+            self.boxPipeline = resources.boxPipeline
+            self.boxVertexBuffer = resources.boxVertexBuffer
+            self.histogramOverlay = resources.histogramOverlay
 
             let mtkView = MTKView()
-            mtkView.device = device
+            mtkView.device = resources.device
             mtkView.framebufferOnly = true
             mtkView.colorPixelFormat = .bgra8Unorm
             // On-demand rendering: only draw when a new frame arrives via setNeedsDisplay()
@@ -219,39 +250,30 @@
             super.init(frame: .zero)
 
             mtkView.delegate = self
-            addSubview(mtkView)
-            mtkView.translatesAutoresizingMaskIntoConstraints = false
-            NSLayoutConstraint.activate([
-                mtkView.topAnchor.constraint(equalTo: topAnchor),
-                mtkView.bottomAnchor.constraint(equalTo: bottomAnchor),
-                mtkView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                mtkView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            ])
-
-            // Label overlay sits above the Metal view, pinned to the same bounds.
-            labelOverlayView.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(labelOverlayView)
-            NSLayoutConstraint.activate([
-                labelOverlayView.topAnchor.constraint(equalTo: topAnchor),
-                labelOverlayView.bottomAnchor.constraint(equalTo: bottomAnchor),
-                labelOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                labelOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            ])
-
-            // Dot overlay sits above the Metal view, pinned to the same bounds.
-            dotOverlayView.translatesAutoresizingMaskIntoConstraints = false
-            addSubview(dotOverlayView)
-            NSLayoutConstraint.activate([
-                dotOverlayView.topAnchor.constraint(equalTo: topAnchor),
-                dotOverlayView.bottomAnchor.constraint(equalTo: bottomAnchor),
-                dotOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
-                dotOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
-            ])
+            pinToBounds(mtkView)
+            pinToBounds(labelOverlayView)
+            pinToBounds(dotOverlayView)
 
             // Touches must reach this view's gesture recognizers, not the MTKView layered over it.
             mtkView.isUserInteractionEnabled = false
             setupGestures()
+            observeMemoryWarnings()
+        }
 
+        /// Add `subview` and pin its four edges to this view's bounds.
+        private func pinToBounds(_ subview: UIView) {
+            subview.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(subview)
+            NSLayoutConstraint.activate([
+                subview.topAnchor.constraint(equalTo: topAnchor),
+                subview.bottomAnchor.constraint(equalTo: bottomAnchor),
+                subview.leadingAnchor.constraint(equalTo: leadingAnchor),
+                subview.trailingAnchor.constraint(equalTo: trailingAnchor),
+            ])
+        }
+
+        /// Flush the Metal texture cache on a memory warning to release backing IOSurfaces.
+        private func observeMemoryWarnings() {
             NotificationCenter.default.addObserver(
                 forName: UIApplication.didReceiveMemoryWarningNotification,
                 object: nil,
@@ -437,6 +459,26 @@
             }
         }
 
+        /// Show or hide the live histogram drawn over the preview.
+        func setHistogramVisible(_ visible: Bool) {
+            _histogramVisible.withLock { $0 = visible }
+            markNeedsRedraw()
+        }
+
+        /// Update the live histogram's channels, frame, and opacity.
+        func setHistogramConfig(_ config: HistogramConfig) {
+            _histogramConfig.withLock { $0 = config }
+            markNeedsRedraw()
+        }
+
+        /// Flag a redraw and request one on the main thread (MTKView requires main-thread display).
+        private func markNeedsRedraw() {
+            _needsDraw.withLock { $0 = true }
+            DispatchQueue.main.async { [weak self] in
+                self?.mtkView.setNeedsDisplay()
+            }
+        }
+
         /// Current aspect-fill + zoom transform, used to place both boxes and labels.
         /// Read `aspectFillUniforms` on the main thread (where it is mutated).
         private func currentOverlayTransform() -> OverlayTransform {
@@ -532,9 +574,17 @@
             passDescriptor.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
             passDescriptor.colorAttachments[0].storeAction = .store
 
-            guard let commandBuffer = commandQueue.makeCommandBuffer(),
-                let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor)
-            else {
+            guard let commandBuffer = commandQueue.makeCommandBuffer() else { return }
+
+            // Histogram compute runs before the render pass so the draw reads fresh bins.
+            // Encoded on the same command buffer; the draw step adds it over the frame below.
+            let histogramVisible = _histogramVisible.withLock { $0 }
+            let histogramConfig = _histogramConfig.withLock { $0 }
+            if histogramVisible {
+                maybeComputeHistogram(from: frame.mtlTexture, config: histogramConfig, in: commandBuffer)
+            }
+
+            guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
                 return
             }
 
@@ -555,9 +605,31 @@
                 drawOverlays(overlays, encoder: encoder)
             }
 
+            // 3. Draw the live histogram over everything (read-only exposure aid).
+            if histogramVisible, let histogramOverlay {
+                histogramOverlay.encodeDraw(in: encoder, config: histogramConfig)
+            }
+
             encoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
+        }
+
+        // MARK: - Histogram
+
+        /// Recomputes the histogram at most every `histogramComputeInterval`, encoding the
+        /// compute passes onto `commandBuffer` before the render pass. Runs on the main thread
+        /// inside `draw(in:)`, so `lastHistogramComputeTime` needs no lock.
+        private func maybeComputeHistogram(
+            from texture: MTLTexture,
+            config: HistogramConfig,
+            in commandBuffer: MTLCommandBuffer
+        ) {
+            guard let histogramOverlay else { return }
+            let now = CACurrentMediaTime()
+            guard now - lastHistogramComputeTime >= histogramComputeInterval else { return }
+            lastHistogramComputeTime = now
+            histogramOverlay.encodeCompute(texture: texture, in: commandBuffer, config: config)
         }
 
         // MARK: - Overlay Drawing
@@ -572,9 +644,12 @@
 
             // One quad (2 triangles = 6 vertices) per box.
             let verticesPerBox = 6
-            let maxBoxes = maxBoxVertices / verticesPerBox
+            let maxBoxes = Self.maxBoxVertices / verticesPerBox
 
-            let pointer = boxVertexBuffer.contents().bindMemory(to: BoxVertex.self, capacity: maxBoxVertices)
+            let pointer = boxVertexBuffer.contents().bindMemory(
+                to: BoxVertex.self,
+                capacity: Self.maxBoxVertices
+            )
 
             let transform = currentOverlayTransform()
 

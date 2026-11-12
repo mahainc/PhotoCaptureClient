@@ -1,5 +1,6 @@
 import DependenciesMacros
 import Foundation
+import HistogramKit
 
 #if os(iOS)
     import UIKit
@@ -89,6 +90,14 @@ public struct PhotoCaptureClient: Sendable {
     /// Choose how detection overlays are drawn on the live preview (boxes vs. a single
     /// animated center dot). Overlay data is still supplied via `updateOverlays`.
     public var setOverlayStyle: @Sendable (_ style: OverlayStyle) -> Void = { _ in }
+
+    /// Show or hide the live RGB + luminance histogram drawn over the preview. It reflects
+    /// the viewfinder in real time as an exposure aid; it does not alter the captured image.
+    public var setHistogramVisible: @Sendable (_ visible: Bool) -> Void = { _ in }
+
+    /// Adjust the live histogram's channels, on-screen frame, and opacity. Takes effect on the
+    /// next drawn frame; independent of `setHistogramVisible`.
+    public var setHistogramConfig: @Sendable (_ config: HistogramConfig) -> Void = { _ in }
 
     // MARK: - Preview Performance
 
