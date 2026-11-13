@@ -30,6 +30,21 @@ extension PhotoCaptureClient: DependencyKey {
             setVisualZoom: { factor, anchorX, anchorY in
                 await actor.setVisualZoom(factor: factor, anchorX: anchorX, anchorY: anchorY)
             },
+            setExposureBias: { bias in
+                try await actor.setExposureBias(bias)
+            },
+            exposureBiasRange: {
+                await actor.exposureBiasRange()
+            },
+            setWhiteBalanceKelvin: { kelvin in
+                try await actor.setWhiteBalanceKelvin(kelvin)
+            },
+            zoomFactorRange: {
+                await actor.zoomFactorRange()
+            },
+            setTorchLevel: { level in
+                try await actor.setTorchLevel(level)
+            },
             requestAuthorization: {
                 await actor.requestAuthorization()
             },

@@ -198,6 +198,33 @@ actor PhotoCaptureClientActor {
         #endif
     }
 
+    // MARK: - Hardware Exposure / White Balance / Torch
+
+    #if os(iOS)
+        func setExposureBias(_ bias: Float) async throws {
+            logger("Setting exposure bias to \(bias) EV")
+            try delegate.setExposureBias(bias)
+        }
+
+        func exposureBiasRange() async -> ClosedRange<Float> {
+            delegate.exposureBiasRange()
+        }
+
+        func setWhiteBalanceKelvin(_ kelvin: Float) async throws {
+            logger("Setting white balance to \(kelvin)K")
+            try delegate.setWhiteBalanceKelvin(kelvin)
+        }
+
+        func zoomFactorRange() async -> ClosedRange<CGFloat> {
+            delegate.zoomFactorRange()
+        }
+
+        func setTorchLevel(_ level: Float) async throws {
+            logger("Setting torch level to \(level)")
+            try delegate.setTorchLevel(level)
+        }
+    #endif
+
     // MARK: - Authorization
 
     func requestAuthorization() async -> PhotoCaptureClient.AuthorizationStatus {

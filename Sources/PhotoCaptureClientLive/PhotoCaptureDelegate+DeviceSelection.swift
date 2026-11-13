@@ -352,6 +352,68 @@ extension PhotoCaptureDelegate {
             guard let device = currentDevice else { return (1, 1) }
             return (device.minAvailableVideoZoomFactor, device.maxAvailableVideoZoomFactor)
         }
+
+        /// Set the exposure target bias (EV), clamped into the device's supported range. Locking the
+        /// device is required before `setExposureTargetBias(_:)` takes effect.
+        func setExposureBias(_ bias: Float) throws {
+            guard let device = currentDevice else {
+                throw PhotoCaptureClient.Error.captureSessionNotRunning
+            }
+            let clamped = min(max(bias, device.minExposureTargetBias), device.maxExposureTargetBias)
+            try device.lockForConfiguration()
+            device.setExposureTargetBias(clamped)
+            device.unlockForConfiguration()
+        }
+
+        /// The active device's supported exposure-bias range in EV, or a `(-2.0)...(2.0)` fallback when
+        /// no device is active yet.
+        func exposureBiasRange() -> ClosedRange<Float> {
+            guard let device = currentDevice else { return (-2.0)...(2.0) }
+            return device.minExposureTargetBias...device.maxExposureTargetBias
+        }
+
+        /// Lock white balance to a kelvin temperature (tint 0): convert to device gains, clamp each
+        /// channel into `1.0 ... maxWhiteBalanceGain`, and apply. Skipped when `.locked` is unsupported.
+        func setWhiteBalanceKelvin(_ kelvin: Float) throws {
+            guard let device = currentDevice else {
+                throw PhotoCaptureClient.Error.captureSessionNotRunning
+            }
+            guard device.isWhiteBalanceModeSupported(.locked) else { return }
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            let temperatureAndTint = AVCaptureDevice.WhiteBalanceTemperatureAndTintValues(
+                temperature: kelvin,
+                tint: 0
+            )
+            var gains = device.deviceWhiteBalanceGains(for: temperatureAndTint)
+            let maxGain = device.maxWhiteBalanceGain
+            gains.redGain = min(max(gains.redGain, 1.0), maxGain)
+            gains.greenGain = min(max(gains.greenGain, 1.0), maxGain)
+            gains.blueGain = min(max(gains.blueGain, 1.0), maxGain)
+            device.setWhiteBalanceModeLocked(with: gains)
+        }
+
+        /// The active device's usable zoom range capped at 10x, or a `1.0...5.0` fallback when no device
+        /// is active yet.
+        func zoomFactorRange() -> ClosedRange<CGFloat> {
+            guard let device = currentDevice else { return 1.0...5.0 }
+            return device.minAvailableVideoZoomFactor...min(device.maxAvailableVideoZoomFactor, 10.0)
+        }
+
+        /// Set the torch level in `0...1`. `<= 0` turns it off; otherwise switch on at `max(level, 0.01)`.
+        /// A no-op on devices without a supported torch (e.g. the front camera) — the control never fails
+        /// for being unavailable.
+        func setTorchLevel(_ level: Float) throws {
+            guard let device = currentDevice else { return }
+            guard device.hasTorch, device.isTorchModeSupported(.on) else { return }
+            try device.lockForConfiguration()
+            defer { device.unlockForConfiguration() }
+            if level <= 0 {
+                device.torchMode = .off
+            } else {
+                try device.setTorchModeOn(level: max(level, 0.01))
+            }
+        }
     #endif
 
     func teardown() {

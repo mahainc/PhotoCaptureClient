@@ -52,6 +52,30 @@ public struct PhotoCaptureClient: Sendable {
         _ in
     }
 
+    // MARK: - Hardware Exposure / White Balance / Torch
+
+    /// Set the exposure target bias (EV) on the active device via `setExposureTargetBias(_:)`,
+    /// clamped to the device's `[minExposureTargetBias, maxExposureTargetBias]` range.
+    public var setExposureBias: @Sendable (_ bias: Float) async throws -> Void
+
+    /// The active device's supported exposure-bias range in EV
+    /// (`minExposureTargetBias ... maxExposureTargetBias`). Falls back to `(-2.0)...(2.0)`
+    /// when no device is active yet.
+    public var exposureBiasRange: @Sendable () async -> ClosedRange<Float> = { (-2.0)...(2.0) }
+
+    /// Lock white balance to a colour temperature in kelvin (tint held at 0), converting it to
+    /// device gains and clamping them to `maxWhiteBalanceGain`. No-op when the device does not
+    /// support a locked white-balance mode.
+    public var setWhiteBalanceKelvin: @Sendable (_ kelvin: Float) async throws -> Void
+
+    /// The active device's usable zoom range (`minAvailableVideoZoomFactor ... maxAvailableVideoZoomFactor`),
+    /// capped at `10.0`. Falls back to `1.0...5.0` when no device is active yet.
+    public var zoomFactorRange: @Sendable () async -> ClosedRange<CGFloat> = { 1.0...5.0 }
+
+    /// Set the torch (video light) level in `0...1`. `<= 0` turns the torch off; otherwise the torch
+    /// is switched on at `max(level, 0.01)`. No-op on devices without a torch (e.g. the front camera).
+    public var setTorchLevel: @Sendable (_ level: Float) async throws -> Void
+
     // MARK: - Authorization
 
     public var requestAuthorization: @Sendable () async -> AuthorizationStatus = { .notDetermined }

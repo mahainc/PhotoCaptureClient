@@ -50,6 +50,11 @@ extension PhotoCaptureClient {
         focus: { _ in },
         setZoomFactor: { _ in },
         setVisualZoom: { _, _, _ in },
+        setExposureBias: { _ in },
+        exposureBiasRange: { (-2.0)...(2.0) },
+        setWhiteBalanceKelvin: { _ in },
+        zoomFactorRange: { 1.0...5.0 },
+        setTorchLevel: { _ in },
         requestAuthorization: { .authorized },
         authorizationStatus: { .authorized },
         events: { AsyncStream { _ in } },
@@ -86,6 +91,11 @@ extension PhotoCaptureClient {
         focus: { _ in },
         setZoomFactor: { _ in },
         setVisualZoom: { _, _, _ in },
+        setExposureBias: { _ in },
+        exposureBiasRange: { (-2.0)...(2.0) },
+        setWhiteBalanceKelvin: { _ in },
+        zoomFactorRange: { 1.0...5.0 },
+        setTorchLevel: { _ in },
         requestAuthorization: { .authorized },
         authorizationStatus: { .authorized },
         events: {
@@ -127,6 +137,17 @@ extension PhotoCaptureClient {
             throw PhotoCaptureClient.Error.zoomFactorOutOfRange(min: 1.0, max: 10.0)
         },
         setVisualZoom: { _, _, _ in },
+        setExposureBias: { _ in
+            throw PhotoCaptureClient.Error.captureSessionNotRunning
+        },
+        exposureBiasRange: { (-2.0)...(2.0) },
+        setWhiteBalanceKelvin: { _ in
+            throw PhotoCaptureClient.Error.captureSessionNotRunning
+        },
+        zoomFactorRange: { 1.0...5.0 },
+        setTorchLevel: { _ in
+            throw PhotoCaptureClient.Error.captureSessionNotRunning
+        },
         requestAuthorization: { .denied },
         authorizationStatus: { .denied },
         events: {
