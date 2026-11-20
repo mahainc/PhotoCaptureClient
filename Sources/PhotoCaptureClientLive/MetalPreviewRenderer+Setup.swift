@@ -16,6 +16,7 @@
         let boxVertexBuffer: MTLBuffer
         let histogramOverlay: Histogram.Overlay?
         let channelGainPipeline: MTLComputePipelineState?
+        let textPipeline: MTLRenderPipelineState?
     }
 
     // MARK: - Metal Setup
@@ -80,6 +81,9 @@
             let channelGainPipeline = library.makeFunction(name: "applyChannelGain")
                 .flatMap { try? device.makeComputePipelineState(function: $0) }
 
+            // Optional: the preview still runs, without text overlays, if the text pipeline fails to build.
+            let textPipeline = makeTextPipeline(device: device, library: library)
+
             return MetalPreviewRenderer(
                 resources: Resources(
                     device: device,
@@ -89,9 +93,28 @@
                     boxPipeline: boxPipeline,
                     boxVertexBuffer: boxVertexBuffer,
                     histogramOverlay: histogramOverlay,
-                    channelGainPipeline: channelGainPipeline
+                    channelGainPipeline: channelGainPipeline,
+                    textPipeline: textPipeline
                 )
             )
+        }
+
+        /// Premultiplied blending: the text fragment already scales color by coverage and opacity.
+        private static func makeTextPipeline(
+            device: MTLDevice,
+            library: MTLLibrary
+        ) -> MTLRenderPipelineState? {
+            let descriptor = MTLRenderPipelineDescriptor()
+            descriptor.vertexFunction = library.makeFunction(name: "textVertex")
+            descriptor.fragmentFunction = library.makeFunction(name: "textFragment")
+            let attachment = descriptor.colorAttachments[0]
+            attachment?.pixelFormat = .bgra8Unorm
+            attachment?.isBlendingEnabled = true
+            attachment?.sourceRGBBlendFactor = .one
+            attachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
+            attachment?.sourceAlphaBlendFactor = .one
+            attachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+            return try? device.makeRenderPipelineState(descriptor: descriptor)
         }
     }
 #endif

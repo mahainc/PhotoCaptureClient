@@ -40,14 +40,11 @@ final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         get { _latestDepthMap.withLockUnchecked { $0.buffer } }
         set { _latestDepthMap.withLockUnchecked { $0.buffer = newValue } }
     }
-    /// Whether depth is actually running: a depth output is attached AND its connection
-    /// reported `isActive` for the format in use.
-    ///
-    /// It used to be set on `addOutput` succeeding, which made it claim depth on a device
-    /// that delivered none — the connection can be enabled and inactive at once. Nothing
-    /// downstream could tell the difference, so `latestDepthMap` stayed `nil` forever
-    /// while this said `true`.
+    /// Depth is running only when its connection reports `isActive` for the format in use;
+    /// a connection can be enabled and inactive at once, which `addOutput` succeeding hides.
     var hasDepth: Bool = false
+    /// The zoom text mode replaced to reach the main lens, put back when the mode ends.
+    var zoomBeforeTextMode: CGFloat?
     /// EXIF orientation applied to the depth map in software so it matches the rotated/mirrored video
     /// buffer — `.right` (back, 90° CW) or `.rightMirrored` (front). Set during configuration.
     private let _depthExifOrientation = OSAllocatedUnfairLock<CGImagePropertyOrientation>(
@@ -73,10 +70,22 @@ final class PhotoCaptureDelegate: NSObject, @unchecked Sendable {
         set { _pixelBufferContinuation.withLock { $0 = newValue } }
     }
 
-    // Throttling: only deliver a frame every 333ms (~3fps) for YOLO inference.
-    // 3fps is visually smooth for detection boxes while reducing ~40% inference CPU.
-    let frameIntervalSeconds: CFTimeInterval = 0.333
+    static let defaultFrameIntervalSeconds: CFTimeInterval = 0.333
+
+    // Written from actor context (setFrameDeliveryInterval), read on videoDataQueue.
+    private let _frameIntervalSeconds = OSAllocatedUnfairLock<CFTimeInterval>(
+        initialState: PhotoCaptureDelegate.defaultFrameIntervalSeconds
+    )
+
+    var frameIntervalSeconds: CFTimeInterval {
+        get { _frameIntervalSeconds.withLock { $0 } }
+        set { _frameIntervalSeconds.withLock { $0 = newValue } }
+    }
     var lastFrameTime: CFTimeInterval = 0
+
+    // Depth keeps the detection cadence even when frame delivery is sped up: its CPU conversion
+    // is a measurable share of the thermal load and nothing samples it faster.
+    let depthIntervalSeconds: CFTimeInterval = PhotoCaptureDelegate.defaultFrameIntervalSeconds
 
     // Depth maps are converted to Float32 and reoriented on the CPU in every callback, but the
     // sampler reads depth only when a throttled video frame is delivered. Processing all ~30fps was

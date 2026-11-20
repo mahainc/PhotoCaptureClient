@@ -109,3 +109,59 @@ fragment float4 boxFragment(BoxVertexOut in [[stage_in]]) {
     color.a *= ring;
     return color;
 }
+
+// MARK: - Text Overlay Rendering
+
+// Must match `TextVertex` in PreviewUniforms.swift; `background` first so the layout has no padding.
+struct TextVertex {
+    float4 background;
+    float2 position;   // Normalized camera-texture coordinates (top-left origin)
+    float2 localPos;   // Pixels from the cover's center
+    float2 halfSize;   // Cover half-extent in pixels
+    float2 spriteUV;   // Text sprite coordinates; outside 0..1 there are no glyphs
+    float2 params;     // x = corner radius (px), y = opacity
+};
+
+struct TextVertexOut {
+    float4 position [[position]];
+    float2 cameraUV;
+    float4 background;
+    float2 localPos;
+    float2 halfSize;
+    float2 spriteUV;
+    float2 params;
+};
+
+// The inverse of cameraVertex's mapping, so text lands exactly on the pixels it was read from.
+vertex TextVertexOut textVertex(uint vertexID [[vertex_id]],
+                                const device TextVertex* vertices [[buffer(0)]],
+                                constant AspectFillUniforms& uniforms [[buffer(1)]]) {
+    TextVertex v = vertices[vertexID];
+    float2 screen = (v.position - uniforms.uvOffset) / uniforms.uvScale;
+    screen = (screen - uniforms.zoomAnchor) * uniforms.zoomFactor + uniforms.zoomAnchor;
+    TextVertexOut out;
+    out.position = float4(screen.x * 2.0 - 1.0, 1.0 - screen.y * 2.0, 0.0, 1.0);
+    out.cameraUV = v.position;
+    out.background = v.background;
+    out.localPos = v.localPos;
+    out.halfSize = v.halfSize;
+    out.spriteUV = v.spriteUV;
+    out.params = v.params;
+    return out;
+}
+
+// Premultiplied output: glyphs over a rounded frosted cover (the blurred camera, tinted by
+// `background`), both scaled by opacity.
+fragment float4 textFragment(TextVertexOut in [[stage_in]],
+                             texture2d<float> sprite [[texture(0)]],
+                             texture2d<float> backdrop [[texture(1)]]) {
+    constexpr sampler spriteSampler(mag_filter::linear, min_filter::linear, address::clamp_to_zero);
+    constexpr sampler backdropSampler(mag_filter::linear, min_filter::linear, address::clamp_to_edge);
+    float dist = sdRoundBox(in.localPos, in.halfSize, in.params.x);
+    float aa = max(fwidth(dist), 1e-4);
+    float coverage = 1.0 - smoothstep(-aa, aa, dist);
+    float3 frosted = mix(backdrop.sample(backdropSampler, in.cameraUV).rgb, in.background.rgb, in.background.a);
+    float4 background = float4(frosted, 1.0) * coverage;
+    float4 glyphs = sprite.sample(spriteSampler, in.spriteUV);
+    return (glyphs + background * (1.0 - glyphs.a)) * in.params.y;
+}

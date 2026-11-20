@@ -114,6 +114,9 @@ extension PhotoCaptureClient {
 
         // Zoom
         case zoomChanged(CGFloat)
+
+        /// A tap landed on the text overlay with this id instead of focusing the camera.
+        case textOverlayTapped(UUID)
     }
 }
 
@@ -280,6 +283,45 @@ extension PhotoCaptureClient {
     }
 }
 
+// MARK: - TextOverlay
+
+extension PhotoCaptureClient {
+    /// Text drawn on the preview in camera-texture space, so it moves with the frame it covers.
+    /// Geometry is normalized to the texture (0-1, top-left origin).
+    public struct TextOverlay: Sendable, Equatable, Identifiable {
+        public let id: UUID
+        public let text: String
+        /// The source box: text wraps to its width and starts at its top-left, unless that would
+        /// overlap other text, which pushes the cover down.
+        public let frame: CGRect
+        /// Radians, clockwise on screen, about the frame's top-left corner.
+        public let angle: Double
+        /// One printed line's height; the font is sized from it.
+        public let lineHeight: CGFloat
+        public let textColor: SIMD4<Float>
+        /// Tinted over the blurred camera behind the cover; alpha is the tint's strength.
+        public let backgroundColor: SIMD4<Float>
+
+        public init(
+            id: UUID,
+            text: String,
+            frame: CGRect,
+            angle: Double,
+            lineHeight: CGFloat,
+            textColor: SIMD4<Float>,
+            backgroundColor: SIMD4<Float>
+        ) {
+            self.id = id
+            self.text = text
+            self.frame = frame
+            self.angle = angle
+            self.lineHeight = lineHeight
+            self.textColor = textColor
+            self.backgroundColor = backgroundColor
+        }
+    }
+}
+
 // MARK: - OverlayStyle
 
 extension PhotoCaptureClient {
@@ -301,6 +343,8 @@ extension PhotoCaptureClient {
     public enum PreviewPerformanceMode: Sendable, Equatable {
         case full
         case reduced
+        /// Reading text: depth off and the sharpest non-binned 16:9 format up to 1920 wide, at 30 fps.
+        case text
     }
 }
 

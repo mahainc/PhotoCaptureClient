@@ -51,7 +51,7 @@ extension PhotoCaptureClient {
         setZoomFactor: { _ in },
         setVisualZoom: { _, _, _ in },
         setExposureBias: { _ in },
-        exposureBiasRange: { (-2.0)...(2.0) },
+        exposureBiasRange: { PhotoCaptureClient.defaultExposureBiasRange },
         setWhiteBalanceKelvin: { _ in },
         zoomFactorRange: { 1.0...5.0 },
         setTorchLevel: { _ in },
@@ -61,11 +61,13 @@ extension PhotoCaptureClient {
         pixelBufferStream: { AsyncStream { _ in } },
         previewView: { await _mockPreviewView() },
         updateOverlays: { _ in },
+        updateTextOverlays: { _ in },
         setLabelsVisible: { _ in },
         setOverlayStyle: { _ in },
         setHistogramVisible: { _ in },
         setHistogramConfig: { _ in },
         setPreviewChannelGains: { _ in },
+        setFrameDeliveryInterval: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 
@@ -92,7 +94,7 @@ extension PhotoCaptureClient {
         setZoomFactor: { _ in },
         setVisualZoom: { _, _, _ in },
         setExposureBias: { _ in },
-        exposureBiasRange: { (-2.0)...(2.0) },
+        exposureBiasRange: { PhotoCaptureClient.defaultExposureBiasRange },
         setWhiteBalanceKelvin: { _ in },
         zoomFactorRange: { 1.0...5.0 },
         setTorchLevel: { _ in },
@@ -109,11 +111,13 @@ extension PhotoCaptureClient {
         pixelBufferStream: { AsyncStream { _ in } },
         previewView: { await _mockPreviewView() },
         updateOverlays: { _ in },
+        updateTextOverlays: { _ in },
         setLabelsVisible: { _ in },
         setOverlayStyle: { _ in },
         setHistogramVisible: { _ in },
         setHistogramConfig: { _ in },
         setPreviewChannelGains: { _ in },
+        setFrameDeliveryInterval: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 
@@ -140,7 +144,7 @@ extension PhotoCaptureClient {
         setExposureBias: { _ in
             throw PhotoCaptureClient.Error.captureSessionNotRunning
         },
-        exposureBiasRange: { (-2.0)...(2.0) },
+        exposureBiasRange: { PhotoCaptureClient.defaultExposureBiasRange },
         setWhiteBalanceKelvin: { _ in
             throw PhotoCaptureClient.Error.captureSessionNotRunning
         },
@@ -162,11 +166,13 @@ extension PhotoCaptureClient {
         pixelBufferStream: { AsyncStream { _ in } },
         previewView: { await _mockPreviewView() },
         updateOverlays: { _ in },
+        updateTextOverlays: { _ in },
         setLabelsVisible: { _ in },
         setOverlayStyle: { _ in },
         setHistogramVisible: { _ in },
         setHistogramConfig: { _ in },
         setPreviewChannelGains: { _ in },
+        setFrameDeliveryInterval: { _ in },
         setPreviewPerformanceMode: { _ in }
     )
 }

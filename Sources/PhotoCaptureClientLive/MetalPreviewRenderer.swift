@@ -43,6 +43,10 @@
         /// histogram only measures them.
         let channelGainPipeline: MTLComputePipelineState?
 
+        /// Live-translated text, drawn in the camera pass. `nil` if its pipeline could not be built.
+        private let textOverlayLayer: TextOverlayLayer?
+        private let textBackdrop: TextBackdrop?
+
         /// Destination for the channel-gain filter, reused across frames and resized to match the
         /// camera texture. Touched only on the main thread inside `draw(in:)`.
         var gainTexture: MTLTexture?
@@ -113,6 +117,9 @@
         /// forwards to the capture device. Set on the main thread.
         var onTapToFocus: ((CGPoint) -> Void)?
 
+        /// Emitted on a tap that lands on a text overlay, with its id; such a tap does not focus.
+        var onTextOverlayTap: ((UUID) -> Void)?
+
         /// Emitted while pinching — a zoom factor already clamped to `zoomLimits`. Set on the main thread.
         var onZoomChange: ((CGFloat) -> Void)?
 
@@ -148,6 +155,10 @@
             self.boxVertexBuffer = resources.boxVertexBuffer
             self.histogramOverlay = resources.histogramOverlay
             self.channelGainPipeline = resources.channelGainPipeline
+            self.textOverlayLayer = resources.textPipeline.map {
+                TextOverlayLayer(device: resources.device, pipeline: $0)
+            }
+            self.textBackdrop = TextBackdrop(device: resources.device)
 
             let mtkView = MTKView()
             mtkView.device = resources.device
@@ -271,17 +282,18 @@
         }
 
         @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
-            guard let focusPoint = cameraFocusPoint(forViewPoint: gesture.location(in: self)) else {
+            guard let texturePoint = texturePoint(forViewPoint: gesture.location(in: self)) else { return }
+            if let id = textOverlayLayer?.overlayID(at: texturePoint) {
+                onTextOverlayTap?(id)
                 return
             }
-            onTapToFocus?(focusPoint)
+            // The video connection rotates portrait → landscape-left (`videoRotationAngle = 90`).
+            onTapToFocus?(CGPoint(x: CGFloat(clampUnit(texturePoint.y)), y: CGFloat(clampUnit(1 - texturePoint.x))))
         }
 
-        /// Map a tap in view coordinates to an AVFoundation focus point of interest. Runs the same
-        /// zoom-about-anchor then aspect-fill the camera shader uses to turn a screen point into a
-        /// texture coordinate, then the portrait → landscape-left rotation the video connection applies
-        /// (`videoRotationAngle = 90`). `nil` before the view has a non-zero size.
-        private func cameraFocusPoint(forViewPoint point: CGPoint) -> CGPoint? {
+        /// Map a point in view coordinates to the camera texture (normalized, top-left origin) with the
+        /// same zoom-about-anchor then aspect-fill the camera shader uses. `nil` before the view has a size.
+        private func texturePoint(forViewPoint point: CGPoint) -> SIMD2<Float>? {
             let size = bounds.size
             guard size.width > 0, size.height > 0 else { return nil }
 
@@ -290,9 +302,10 @@
             let viewV = Float(point.y / size.height)
             let zoomedU = (viewU - zoom.anchorX) / zoom.factor + zoom.anchorX
             let zoomedV = (viewV - zoom.anchorY) / zoom.factor + zoom.anchorY
-            let texU = zoomedU * aspectFillUniforms.uvScale.x + aspectFillUniforms.uvOffset.x
-            let texV = zoomedV * aspectFillUniforms.uvScale.y + aspectFillUniforms.uvOffset.y
-            return CGPoint(x: CGFloat(clampUnit(texV)), y: CGFloat(clampUnit(1 - texU)))
+            return SIMD2(
+                zoomedU * aspectFillUniforms.uvScale.x + aspectFillUniforms.uvOffset.x,
+                zoomedV * aspectFillUniforms.uvScale.y + aspectFillUniforms.uvOffset.y
+            )
         }
 
         private func clampUnit(_ value: Float) -> Float {
@@ -350,6 +363,14 @@
                 self.labelOverlayView.update(overlays: overlays, transform: transform)
                 self.dotOverlayView.update(overlays: overlays, transform: transform)
             }
+        }
+
+        /// Replace the text drawn over the preview; it eases toward new positions frame by frame.
+        func updateTextOverlays(_ overlays: [PhotoCaptureClient.TextOverlay]) {
+            DispatchQueue.main.async { [weak self] in
+                self?.textOverlayLayer?.update(overlays)
+            }
+            markNeedsRedraw()
         }
 
         /// Show or hide the detection labels drawn above the preview.
@@ -508,6 +529,11 @@
                 maybeComputeHistogram(from: sourceTexture, config: histogramConfig, in: commandBuffer)
             }
 
+            // The blur is a compute pass too, so it is encoded before the render pass samples it.
+            let backdrop =
+                textOverlayLayer?.hasContent == true
+                ? textBackdrop?.encodeBlur(of: sourceTexture, in: commandBuffer) : nil
+
             guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDescriptor) else {
                 return
             }
@@ -529,7 +555,16 @@
                 drawOverlays(overlays, encoder: encoder)
             }
 
-            // 3. Draw the live histogram over everything (read-only exposure aid).
+            // 3. Text overlays, mapped by the same uniforms as the camera quad.
+            if let backdrop {
+                textOverlayLayer?.encode(
+                    in: encoder,
+                    geometry: textOverlayGeometry(view: view, uniforms: uniforms),
+                    backdrop: backdrop
+                )
+            }
+
+            // 4. Draw the live histogram over everything (read-only exposure aid).
             if histogramVisible, let histogramOverlay {
                 histogramOverlay.encodeDraw(in: encoder, config: histogramConfig)
             }
@@ -537,6 +572,21 @@
             encoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
+        }
+
+        private func textOverlayGeometry(
+            view: MTKView,
+            uniforms: AspectFillUniforms
+        ) -> TextOverlayGeometry {
+            let textureSize = _textureSize.withLock { $0 }
+            let visibleTexels = textureSize.y * uniforms.uvScale.y
+            return TextOverlayGeometry(
+                textureSize: textureSize,
+                pixelsPerTexel: visibleTexels > 0
+                    ? Float(view.drawableSize.height) / visibleTexels * uniforms.zoomFactor : 0,
+                contentScale: Float(view.contentScaleFactor),
+                uniforms: uniforms
+            )
         }
 
         // MARK: - Histogram

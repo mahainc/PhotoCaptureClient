@@ -58,10 +58,11 @@ public struct PhotoCaptureClient: Sendable {
     /// clamped to the device's `[minExposureTargetBias, maxExposureTargetBias]` range.
     public var setExposureBias: @Sendable (_ bias: Float) async throws -> Void
 
-    /// The active device's supported exposure-bias range in EV
-    /// (`minExposureTargetBias ... maxExposureTargetBias`). Falls back to `(-2.0)...(2.0)`
+    /// The active device's supported exposure-bias range in EV; `defaultExposureBiasRange`
     /// when no device is active yet.
-    public var exposureBiasRange: @Sendable () async -> ClosedRange<Float> = { (-2.0)...(2.0) }
+    public var exposureBiasRange: @Sendable () async -> ClosedRange<Float> = {
+        PhotoCaptureClient.defaultExposureBiasRange
+    }
 
     /// Lock white balance to a colour temperature in kelvin (tint held at 0), converting it to
     /// device gains and clamping them to `maxWhiteBalanceGain`. No-op when the device does not
@@ -107,6 +108,10 @@ public struct PhotoCaptureClient: Sendable {
     /// Note: Updates are best-effort ordered (acceptable since each call fully replaces all overlays).
     public var updateOverlays: @Sendable (_ overlays: [OverlayRect]) -> Void = { _ in }
 
+    /// Replace the text drawn on the Metal preview; it follows the camera frame and eases between
+    /// updates. Pass an empty array to clear.
+    public var updateTextOverlays: @Sendable (_ overlays: [TextOverlay]) -> Void = { _ in }
+
     /// Show or hide detection labels (class name + confidence) drawn on the preview.
     /// Labels are derived from each `OverlayRect`'s `label` / `confidence`; boxes are unaffected.
     public var setLabelsVisible: @Sendable (_ visible: Bool) -> Void = { _ in }
@@ -123,14 +128,22 @@ public struct PhotoCaptureClient: Sendable {
     /// next drawn frame; independent of `setHistogramVisible`.
     public var setHistogramConfig: @Sendable (_ config: Histogram.Config) -> Void = { _ in }
 
-    /// Per-channel RGBA gain applied to the live preview in real time (and to the histogram reading
-    /// it), so dragging the R/G/B/A controls visibly changes the viewfinder. `(1,1,1,1)` leaves the
-    /// feed untouched. Affects the preview only, not the captured photo.
+    /// Per-channel RGBA gain on the live preview and the histogram reading it, not the captured photo;
+    /// `(1,1,1,1)` leaves the feed untouched.
     public var setPreviewChannelGains: @Sendable (_ gains: SIMD4<Float>) -> Void = { _ in }
+
+    /// Minimum gap between frames delivered on `pixelBufferStream` (default 0.333 s, ~3 fps).
+    /// Lower it while a consumer needs more frames, e.g. live OCR; the preview is unaffected.
+    public var setFrameDeliveryInterval: @Sendable (_ seconds: TimeInterval) async -> Void = { _ in }
 
     // MARK: - Preview Performance
 
     /// Lower (or restore) the live preview's running cost without tearing the session down —
     /// used when a result floats over the feed and the full viewfinder is not worth its heat.
     public var setPreviewPerformanceMode: @Sendable (_ mode: PreviewPerformanceMode) async -> Void = { _ in }
+}
+
+extension PhotoCaptureClient {
+    /// The exposure-bias range in EV reported before any device is active.
+    public static let defaultExposureBiasRange: ClosedRange<Float> = -2...2
 }

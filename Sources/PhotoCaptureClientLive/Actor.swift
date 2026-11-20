@@ -26,6 +26,7 @@ actor PhotoCaptureClientActor {
         private var currentVisualZoom: (factor: Float, anchorX: Float, anchorY: Float) = (1.0, 0.5, 0.5)
     #endif
     private var eventContinuations: [UUID: AsyncStream<PhotoCaptureClient.Event>.Continuation] = [:]
+    private var pixelBufferSubscriberID: UUID?
 
     // MARK: - Init
 
@@ -134,9 +135,14 @@ actor PhotoCaptureClientActor {
         currentFlashMode = mode
     }
 
+    func setFrameDeliveryInterval(_ seconds: TimeInterval) {
+        logger("Setting frame delivery interval to \(seconds)s")
+        delegate.frameIntervalSeconds = max(0, seconds)
+    }
+
     func setPreviewPerformanceMode(_ mode: PhotoCaptureClient.PreviewPerformanceMode) {
         logger("Setting preview performance mode to \(mode)")
-        delegate.setPreviewPerformanceMode(reduced: mode == .reduced)
+        delegate.setPreviewPerformanceMode(mode)
     }
 
     func focus(at point: CGPoint) async throws {
@@ -167,6 +173,9 @@ actor PhotoCaptureClientActor {
                 }
                 renderer.onTapToFocus = { [weak self] point in
                     Task { await self?.applyTapToFocus(point) }
+                }
+                renderer.onTextOverlayTap = { [weak self] id in
+                    Task { await self?.yieldEvent(.textOverlayTapped(id)) }
                 }
             }
         }
@@ -260,14 +269,19 @@ actor PhotoCaptureClientActor {
         return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
             // The delegate writes directly into this continuation from the video data queue.
             // Only one subscriber is supported at a time (last subscriber wins).
+            let subscriberID = UUID()
+            pixelBufferSubscriberID = subscriberID
             delegate.pixelBufferContinuation = continuation
             continuation.onTermination = { [weak self] _ in
-                Task { await self?.clearPixelBufferContinuation() }
+                Task { await self?.clearPixelBufferContinuation(subscriberID: subscriberID) }
             }
         }
     }
 
-    private func clearPixelBufferContinuation() {
+    // The termination hop is async, so a stale subscriber must not clear its successor's continuation.
+    private func clearPixelBufferContinuation(subscriberID: UUID) {
+        guard pixelBufferSubscriberID == subscriberID else { return }
+        pixelBufferSubscriberID = nil
         delegate.pixelBufferContinuation = nil
     }
 
@@ -295,6 +309,10 @@ actor PhotoCaptureClientActor {
 
         func updateOverlays(_ overlays: [PhotoCaptureClient.OverlayRect]) {
             metalRenderer?.updateOverlays(overlays)
+        }
+
+        func updateTextOverlays(_ overlays: [PhotoCaptureClient.TextOverlay]) {
+            metalRenderer?.updateTextOverlays(overlays)
         }
 
         func setLabelsVisible(_ visible: Bool) {

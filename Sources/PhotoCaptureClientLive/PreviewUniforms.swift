@@ -26,4 +26,19 @@
         /// x = corner radius (px), y = border width (px).
         var params: SIMD2<Float>
     }
+
+    // MARK: - Text Vertex (matches Metal struct layout)
+
+    /// Must match `TextVertex` in Shaders.metal exactly.
+    struct TextVertex {
+        var background: SIMD4<Float>
+        /// Normalized camera-texture coordinates, top-left origin.
+        var position: SIMD2<Float>
+        /// Pixels from the cover's center (for the SDF corners).
+        var localPos: SIMD2<Float>
+        var halfSize: SIMD2<Float>
+        var spriteUV: SIMD2<Float>
+        /// x = corner radius (px), y = opacity.
+        var params: SIMD2<Float>
+    }
 #endif

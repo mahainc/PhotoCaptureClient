@@ -63,6 +63,9 @@ extension PhotoCaptureClient: DependencyKey {
             updateOverlays: { overlays in
                 Task { await actor.updateOverlays(overlays) }
             },
+            updateTextOverlays: { overlays in
+                Task { await actor.updateTextOverlays(overlays) }
+            },
             setLabelsVisible: { visible in
                 Task { await actor.setLabelsVisible(visible) }
             },
@@ -77,6 +80,9 @@ extension PhotoCaptureClient: DependencyKey {
             },
             setPreviewChannelGains: { gains in
                 Task { await actor.setChannelGains(gains) }
+            },
+            setFrameDeliveryInterval: { seconds in
+                await actor.setFrameDeliveryInterval(seconds)
             },
             setPreviewPerformanceMode: { mode in
                 await actor.setPreviewPerformanceMode(mode)

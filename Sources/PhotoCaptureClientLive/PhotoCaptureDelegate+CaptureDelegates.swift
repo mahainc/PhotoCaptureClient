@@ -88,7 +88,6 @@ extension PhotoCaptureDelegate: AVCaptureVideoDataOutputSampleBufferDelegate {
         // Deliver every frame to Metal renderer at full camera rate
         onFrame?(pixelBuffer)
 
-        // Throttle: only deliver frames for detection inference at ~5fps
         let now = CACurrentMediaTime()
         guard now - lastFrameTime >= frameIntervalSeconds else { return }
         lastFrameTime = now
@@ -122,7 +121,7 @@ extension PhotoCaptureDelegate: AVCaptureDepthDataOutputDelegate {
         // Throttle to the detection cadence: the conversion + EXIF reorientation below are per-frame
         // CPU work, and nothing samples depth faster than video frames are throttled through.
         let now = CACurrentMediaTime()
-        guard now - lastDepthTime >= frameIntervalSeconds else { return }
+        guard now - lastDepthTime >= depthIntervalSeconds else { return }
         lastDepthTime = now
 
         // Normalise to metric depth (metres, smaller = nearer). LiDAR/dual cameras may deliver

@@ -127,7 +127,7 @@ extension PhotoCaptureDelegate {
             guard (try? device.lockForConfiguration()) != nil else { continue }
             device.activeFormat = candidate.format
             device.activeDepthDataFormat = candidate.depthFormat
-            applyClampedFrameRate(device, target: 30)
+            applyClampedFrameRate(device, target: Self.fullPreviewFrameRate)
             device.unlockForConfiguration()
 
             if output.connection(with: .depthData)?.isActive == true {
@@ -135,7 +135,9 @@ extension PhotoCaptureDelegate {
                 let dimensions = CMVideoFormatDescriptionGetDimensions(
                     candidate.format.formatDescription
                 )
-                onLog?("Depth active at \(dimensions.width)x\(dimensions.height)")
+                onLog?(
+                    "Depth active at \(dimensions.width)x\(dimensions.height), field of view \(candidate.format.videoFieldOfView)°"
+                )
                 return
             }
         }
@@ -180,7 +182,7 @@ extension PhotoCaptureDelegate {
             if let previousFormat {
                 device.activeFormat = previousFormat
             }
-            applyClampedFrameRate(device, target: 30)
+            applyClampedFrameRate(device, target: Self.fullPreviewFrameRate)
             device.unlockForConfiguration()
         }
     }
@@ -201,28 +203,98 @@ extension PhotoCaptureDelegate {
     /// The preview frame rate held while a result covers the feed — low enough to shed heat, high
     /// enough that motion behind the result still reads as live rather than stepped.
     private static let reducedPreviewFrameRate: Double = 15
+    private static let fullPreviewFrameRate: Double = 30
 
     /// Lower the live preview's cost in place, or restore the full viewfinder. `reduced` drops the
     /// depth pipeline, caps the frame rate, and shrinks the camera texture; `full` re-runs the
     /// initial depth/format/30fps configuration so the viewfinder returns exactly as it started.
-    func setPreviewPerformanceMode(reduced: Bool) {
+    func setPreviewPerformanceMode(_ mode: PhotoCaptureClient.PreviewPerformanceMode) {
         guard let session = captureSession, let device = currentDevice else { return }
         session.beginConfiguration()
-        if reduced {
-            detachDepthOutput(from: session)
-            latestDepthMap = nil
-            if session.canSetSessionPreset(.hd1280x720) {
-                session.sessionPreset = .hd1280x720
-            }
-            if (try? device.lockForConfiguration()) != nil {
-                applyClampedFrameRate(device, target: Self.reducedPreviewFrameRate)
-                device.unlockForConfiguration()
-            }
-        } else {
-            session.sessionPreset = .photo
-            configureDepth(session: session, device: device)
+        if mode != .text {
+            restoreZoomAfterTextMode(device)
+        }
+        switch mode {
+            case .reduced: applyReducedMode(session: session, device: device)
+            case .text: applyTextMode(session: session, device: device)
+            case .full:
+                session.sessionPreset = .photo
+                configureDepth(session: session, device: device)
         }
         session.commitConfiguration()
+    }
+
+    private func restoreZoomAfterTextMode(_ device: AVCaptureDevice) {
+        guard let zoom = zoomBeforeTextMode, (try? device.lockForConfiguration()) != nil else { return }
+        device.videoZoomFactor = zoom
+        device.unlockForConfiguration()
+        zoomBeforeTextMode = nil
+    }
+
+    private func applyReducedMode(
+        session: AVCaptureSession,
+        device: AVCaptureDevice
+    ) {
+        detachDepthOutput(from: session)
+        latestDepthMap = nil
+        if session.canSetSessionPreset(.hd1280x720) {
+            session.sessionPreset = .hd1280x720
+        }
+        if (try? device.lockForConfiguration()) != nil {
+            applyClampedFrameRate(device, target: Self.reducedPreviewFrameRate)
+            device.unlockForConfiguration()
+        }
+    }
+
+    /// Depth caps the format at 1920x1440, too soft for small print; text needs no depth.
+    private func applyTextMode(
+        session: AVCaptureSession,
+        device: AVCaptureDevice
+    ) {
+        detachDepthOutput(from: session)
+        latestDepthMap = nil
+        guard let format = Self.sharpestTextFormat(for: device),
+            (try? device.lockForConfiguration()) != nil
+        else { return }
+        device.activeFormat = format
+        applyClampedFrameRate(device, target: Self.textFrameRate)
+        switchToMainLens(device)
+        device.unlockForConfiguration()
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        onLog?(
+            "Text format \(dimensions.width)x\(dimensions.height), field of view \(format.videoFieldOfView)°, "
+                + "zoom \(device.videoZoomFactor) (switch-overs \(device.virtualDeviceSwitchOverVideoZoomFactors))"
+        )
+    }
+
+    /// A dual-wide device at zoom 1 is the 0.5x ultra-wide (105° on an iPhone 11 Pro Max), which
+    /// shrinks print and cannot focus close; the first switch-over factor is the 1x main lens.
+    /// Caller holds `lockForConfiguration`.
+    private func switchToMainLens(_ device: AVCaptureDevice) {
+        guard let mainLensZoom = device.virtualDeviceSwitchOverVideoZoomFactors.first.map({ CGFloat($0.doubleValue) })
+        else { return }
+        zoomBeforeTextMode = zoomBeforeTextMode ?? device.videoZoomFactor
+        device.videoZoomFactor = min(mainLensZoom, device.maxAvailableVideoZoomFactor)
+    }
+
+    private static let textFrameRate: Double = 30
+    /// The 3264-wide format made distant text harder to read on an iPhone 11 Pro Max, not easier;
+    /// 1920 keeps the viewfinder's framing at a third of the pixels.
+    private static let maximumTextFormatWidth: Int32 = 1920
+
+    private static func sharpestTextFormat(for device: AVCaptureDevice) -> AVCaptureDevice.Format? {
+        device.formats
+            .filter { isTextFormat($0) }
+            .max { pixelCount(of: $0) < pixelCount(of: $1) }
+    }
+
+    /// 16:9: a portrait screen shows the same middle of a 4:3 frame, so 4:3 only adds text no one sees.
+    private static func isTextFormat(_ format: AVCaptureDevice.Format) -> Bool {
+        let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+        let isSixteenByNine = Int(dimensions.width) * 9 == Int(dimensions.height) * 16
+        let reachesFrameRate = format.videoSupportedFrameRateRanges.contains { $0.maxFrameRate >= textFrameRate }
+        return !format.isVideoBinned && isSixteenByNine && dimensions.width <= maximumTextFormatWidth
+            && reachesFrameRate
     }
 
     /// Remove the depth output without the format/frame-rate restore `disableDepth` performs: the
@@ -365,10 +437,10 @@ extension PhotoCaptureDelegate {
             device.unlockForConfiguration()
         }
 
-        /// The active device's supported exposure-bias range in EV, or a `(-2.0)...(2.0)` fallback when
+        /// The active device's supported exposure-bias range in EV, or the client's default when
         /// no device is active yet.
         func exposureBiasRange() -> ClosedRange<Float> {
-            guard let device = currentDevice else { return (-2.0)...(2.0) }
+            guard let device = currentDevice else { return PhotoCaptureClient.defaultExposureBiasRange }
             return device.minExposureTargetBias...device.maxExposureTargetBias
         }
 
