@@ -50,7 +50,9 @@
         /// A captured photo shown in place of the camera, text overlays included. Main thread only.
         private var stillTexture: MTLTexture?
         /// The still just released, fading out over the camera. Main thread only.
-        private var fadingStill: (texture: MTLTexture, releasedAt: CFTimeInterval)?
+        private var stillFraming = PhotoCaptureClient.Still.Framing.fill
+        /// Faded with the uniforms it was shown with, as the camera's own may frame it differently.
+        private var fadingStill: (texture: MTLTexture, releasedAt: CFTimeInterval, uniforms: AspectFillUniforms)?
         private let fadingStillPipeline: MTLRenderPipelineState?
         private static let stillFadeSeconds: CFTimeInterval = 0.25
         /// Set while a still is up, so camera frames neither replace it nor change its size.
@@ -384,19 +386,22 @@
             markNeedsRedraw()
         }
 
-        /// Show `photoData` in place of the camera until called with `nil`.
-        func showStill(_ photoData: Data?) {
-            _showsStill.withLock { $0 = photoData != nil }
+        /// Show `still` in place of the camera until called with `nil`.
+        func showStill(_ still: PhotoCaptureClient.Still?) {
+            _showsStill.withLock { $0 = still != nil }
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
-                if photoData == nil, let released = stillTexture {
-                    fadingStill = (released, CACurrentMediaTime())
+                if still == nil, let released = stillTexture {
+                    fadingStill = (released, CACurrentMediaTime(), aspectFillUniforms)
                 }
-                stillTexture = photoData.flatMap { StillTexture.make(from: $0, device: self.device) }
+                stillTexture = still.flatMap { StillTexture.make(from: $0.photoData, device: self.device) }
+                stillFraming = still?.framing ?? .fill
                 if let stillTexture {
                     let size = SIMD2(Float(stillTexture.width), Float(stillTexture.height))
                     _textureSize.withLock { $0 = size }
                 }
+                // The framing can change with the size unchanged, so the next draw recomputes either way.
+                lastTextureSize = .zero
                 markNeedsRedraw()
             }
         }
@@ -461,8 +466,8 @@
 
         // MARK: - Aspect-Fill Computation
 
-        /// Recomputes UV scale/offset so the camera texture fills the view
-        /// without stretching (aspect-fill with center crop).
+        /// Recomputes UV scale/offset so the texture fills the view without stretching (center crop),
+        /// or for a fitted still shows whole inside it.
         private func recomputeAspectFill(
             drawableSize: CGSize,
             textureSize: SIMD2<Float>
@@ -475,11 +480,12 @@
             var scaleX: Float = 1.0
             var scaleY: Float = 1.0
 
-            if texAspect > viewAspect {
-                // Texture is wider than view — crop sides
+            // Fill scales the texture's longer side relative to the view down (cropping it); fit
+            // scales the shorter one up (past the texture's edge, drawn as letterbox).
+            let fitsWhole = stillTexture != nil && stillFraming == .fit
+            if (texAspect > viewAspect) != fitsWhole {
                 scaleX = viewAspect / texAspect
             } else {
-                // Texture is taller than view — crop top/bottom
                 scaleY = texAspect / viewAspect
             }
 
@@ -577,7 +583,7 @@
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<AspectFillUniforms>.size, index: 0)
             encoder.setFragmentTexture(sourceTexture, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
-            drawFadingStill(in: encoder, uniforms: uniforms)
+            drawFadingStill(in: encoder)
 
             // 2. Draw bounding box overlays (skipped in `.centerDot` style — the dot is a
             //    CoreAnimation overlay drawn by `dotOverlayView`, not a Metal primitive).
@@ -607,12 +613,9 @@
 
         /// Draws the released still over the camera at its remaining opacity, asking for the next
         /// frame until it is gone so the fade runs even if the camera is slow to deliver.
-        private func drawFadingStill(
-            in encoder: MTLRenderCommandEncoder,
-            uniforms: AspectFillUniforms
-        ) {
+        private func drawFadingStill(in encoder: MTLRenderCommandEncoder) {
             guard let fading = fadingStill, let fadingStillPipeline else { return }
-            var uniforms = uniforms
+            var uniforms = fading.uniforms
             var opacity = Float(1 - (CACurrentMediaTime() - fading.releasedAt) / Self.stillFadeSeconds)
             guard opacity > 0 else {
                 fadingStill = nil

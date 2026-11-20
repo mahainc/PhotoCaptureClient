@@ -12,6 +12,27 @@ import simd
 // MARK: - Photo
 
 extension PhotoCaptureClient {
+    /// A photo shown in place of the camera, text overlays drawn over it.
+    public struct Still: Sendable, Equatable {
+        public enum Framing: Sendable, Equatable {
+            /// Cropped to fill the screen like the preview, for a photo framed through it.
+            case fill
+            /// The whole photo, letterboxed, for one framed elsewhere (a library photo).
+            case fit
+        }
+
+        public let photoData: Data
+        public let framing: Framing
+
+        public init(
+            photoData: Data,
+            framing: Framing
+        ) {
+            self.photoData = photoData
+            self.framing = framing
+        }
+    }
+
     /// Captured photo data extracted from AVCapturePhoto at the delegate boundary.
     /// AVCapturePhoto has no public initializer, so this wrapper enables mock construction.
     public struct Photo: Sendable, Equatable {

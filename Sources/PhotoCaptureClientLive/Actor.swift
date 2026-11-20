@@ -315,8 +315,8 @@ actor PhotoCaptureClientActor {
             metalRenderer?.updateTextOverlays(overlays)
         }
 
-        func showStill(_ photoData: Data?) {
-            metalRenderer?.showStill(photoData)
+        func showStill(_ still: PhotoCaptureClient.Still?) {
+            metalRenderer?.showStill(still)
         }
 
         func setLabelsVisible(_ visible: Bool) {

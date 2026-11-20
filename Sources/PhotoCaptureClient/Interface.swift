@@ -112,9 +112,8 @@ public struct PhotoCaptureClient: Sendable {
     /// updates. Pass an empty array to clear.
     public var updateTextOverlays: @Sendable (_ overlays: [TextOverlay]) -> Void = { _ in }
 
-    /// Show a captured photo in place of the camera, text overlays drawn over it; `nil` returns to the
-    /// camera. The photo is drawn with the camera's aspect-fill, so it frames like the preview did.
-    public var showStill: @Sendable (_ photoData: Data?) -> Void = { _ in }
+    /// Show a photo in place of the camera, text overlays drawn over it; `nil` returns to the camera.
+    public var showStill: @Sendable (_ still: Still?) -> Void = { _ in }
 
     /// Show or hide detection labels (class name + confidence) drawn on the preview.
     /// Labels are derived from each `OverlayRect`'s `label` / `confidence`; boxes are unaffected.

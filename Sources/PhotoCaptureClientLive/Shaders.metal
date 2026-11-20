@@ -36,10 +36,18 @@ vertex CameraVertexOut cameraVertex(uint vertexID [[vertex_id]],
     return out;
 }
 
+/// A fitted still leaves the view past its edges; that letterbox is drawn black.
+static bool isOutsideTexture(float2 texCoord) {
+    return any(texCoord < 0.0) || any(texCoord > 1.0);
+}
+
 fragment float4 cameraFragment(CameraVertexOut in [[stage_in]],
                                 texture2d<float> cameraTexture [[texture(0)]]) {
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear,
                                   address::clamp_to_edge);
+    if (isOutsideTexture(in.texCoord)) {
+        return float4(0.0, 0.0, 0.0, 1.0);
+    }
     return cameraTexture.sample(texSampler, in.texCoord);
 }
 
@@ -49,6 +57,9 @@ fragment float4 fadingStillFragment(CameraVertexOut in [[stage_in]],
                                     constant float& opacity [[buffer(0)]]) {
     constexpr sampler texSampler(mag_filter::linear, min_filter::linear,
                                   address::clamp_to_edge);
+    if (isOutsideTexture(in.texCoord)) {
+        return float4(0.0);
+    }
     return float4(still.sample(texSampler, in.texCoord).rgb * opacity, opacity);
 }
 
