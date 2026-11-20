@@ -43,6 +43,15 @@ fragment float4 cameraFragment(CameraVertexOut in [[stage_in]],
     return cameraTexture.sample(texSampler, in.texCoord);
 }
 
+/// A released still drawn over the returning camera, premultiplied by `opacity` as it fades out.
+fragment float4 fadingStillFragment(CameraVertexOut in [[stage_in]],
+                                    texture2d<float> still [[texture(0)]],
+                                    constant float& opacity [[buffer(0)]]) {
+    constexpr sampler texSampler(mag_filter::linear, min_filter::linear,
+                                  address::clamp_to_edge);
+    return float4(still.sample(texSampler, in.texCoord).rgb * opacity, opacity);
+}
+
 // MARK: - Channel-Gain Filter (pure pixel transform)
 
 /// Per-channel RGBA gain, applied once to produce the filtered texture that both the preview and
@@ -152,6 +161,16 @@ vertex TextVertexOut textVertex(uint vertexID [[vertex_id]],
 
 // Premultiplied output: glyphs over a rounded frosted cover (the blurred camera, tinted by
 // `background`), both scaled by opacity.
+// Small type is mostly anti-aliased edge, which reads gray on the dark cover; raising the
+// coverage keeps the text's own color solid and the edges crisp.
+constant float glyphCoverageGain = 1.6;
+
+float4 solidGlyphs(float4 premultiplied) {
+    float alpha = saturate(premultiplied.a * glyphCoverageGain);
+    float3 color = premultiplied.a > 0.0 ? premultiplied.rgb / premultiplied.a : float3(0.0);
+    return float4(color * alpha, alpha);
+}
+
 fragment float4 textFragment(TextVertexOut in [[stage_in]],
                              texture2d<float> sprite [[texture(0)]],
                              texture2d<float> backdrop [[texture(1)]]) {
@@ -162,6 +181,6 @@ fragment float4 textFragment(TextVertexOut in [[stage_in]],
     float coverage = 1.0 - smoothstep(-aa, aa, dist);
     float3 frosted = mix(backdrop.sample(backdropSampler, in.cameraUV).rgb, in.background.rgb, in.background.a);
     float4 background = float4(frosted, 1.0) * coverage;
-    float4 glyphs = sprite.sample(spriteSampler, in.spriteUV);
+    float4 glyphs = solidGlyphs(sprite.sample(spriteSampler, in.spriteUV));
     return (glyphs + background * (1.0 - glyphs.a)) * in.params.y;
 }

@@ -66,6 +66,9 @@ extension PhotoCaptureClient: DependencyKey {
             updateTextOverlays: { overlays in
                 Task { await actor.updateTextOverlays(overlays) }
             },
+            showStill: { photoData in
+                Task { await actor.showStill(photoData) }
+            },
             setLabelsVisible: { visible in
                 Task { await actor.setLabelsVisible(visible) }
             },

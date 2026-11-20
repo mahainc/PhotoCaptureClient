@@ -47,6 +47,15 @@
         private let textOverlayLayer: TextOverlayLayer?
         private let textBackdrop: TextBackdrop?
 
+        /// A captured photo shown in place of the camera, text overlays included. Main thread only.
+        private var stillTexture: MTLTexture?
+        /// The still just released, fading out over the camera. Main thread only.
+        private var fadingStill: (texture: MTLTexture, releasedAt: CFTimeInterval)?
+        private let fadingStillPipeline: MTLRenderPipelineState?
+        private static let stillFadeSeconds: CFTimeInterval = 0.25
+        /// Set while a still is up, so camera frames neither replace it nor change its size.
+        private let _showsStill = OSAllocatedUnfairLock<Bool>(initialState: false)
+
         /// Destination for the channel-gain filter, reused across frames and resized to match the
         /// camera texture. Touched only on the main thread inside `draw(in:)`.
         var gainTexture: MTLTexture?
@@ -151,6 +160,7 @@
             self.commandQueue = resources.commandQueue
             self.textureCache = resources.textureCache
             self.cameraPipeline = resources.cameraPipeline
+            self.fadingStillPipeline = resources.fadingStillPipeline
             self.boxPipeline = resources.boxPipeline
             self.boxVertexBuffer = resources.boxVertexBuffer
             self.histogramOverlay = resources.histogramOverlay
@@ -318,6 +328,7 @@
         /// Creates a Metal texture from the pixel buffer (zero-copy via CVMetalTextureCache)
         /// and stores it for the next display-link-driven draw call.
         func enqueueFrame(_ pixelBuffer: CVPixelBuffer) {
+            guard !_showsStill.withLock({ $0 }) else { return }
             let width = CVPixelBufferGetWidth(pixelBuffer)
             let height = CVPixelBufferGetHeight(pixelBuffer)
 
@@ -371,6 +382,23 @@
                 self?.textOverlayLayer?.update(overlays)
             }
             markNeedsRedraw()
+        }
+
+        /// Show `photoData` in place of the camera until called with `nil`.
+        func showStill(_ photoData: Data?) {
+            _showsStill.withLock { $0 = photoData != nil }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if photoData == nil, let released = stillTexture {
+                    fadingStill = (released, CACurrentMediaTime())
+                }
+                stillTexture = photoData.flatMap { StillTexture.make(from: $0, device: self.device) }
+                if let stillTexture {
+                    let size = SIMD2(Float(stillTexture.width), Float(stillTexture.height))
+                    _textureSize.withLock { $0 = size }
+                }
+                markNeedsRedraw()
+            }
         }
 
         /// Show or hide the detection labels drawn above the preview.
@@ -495,7 +523,9 @@
             }
             guard needsDraw else { return }
 
-            guard let frame = _currentFrame.withLock({ $0 }),
+            // `frame` keeps the camera texture's IOSurface alive until the draw is encoded.
+            let frame = _currentFrame.withLock { $0 }
+            guard let shownTexture = stillTexture ?? frame?.mtlTexture,
                 let drawable = view.currentDrawable,
                 let passDescriptor = view.currentRenderPassDescriptor
             else {
@@ -521,7 +551,7 @@
 
             // Apply the channel-gain filter once; the preview and the histogram both read its result,
             // so the filter transforms pixels in one place and the histogram just measures them.
-            let sourceTexture = filteredTexture(from: frame.mtlTexture, gains: channelGains, in: commandBuffer)
+            let sourceTexture = filteredTexture(from: shownTexture, gains: channelGains, in: commandBuffer)
 
             // Histogram compute runs before the render pass so the draw reads fresh bins.
             // Encoded on the same command buffer; the draw step adds it over the frame below.
@@ -547,6 +577,7 @@
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<AspectFillUniforms>.size, index: 0)
             encoder.setFragmentTexture(sourceTexture, index: 0)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            drawFadingStill(in: encoder, uniforms: uniforms)
 
             // 2. Draw bounding box overlays (skipped in `.centerDot` style — the dot is a
             //    CoreAnimation overlay drawn by `dotOverlayView`, not a Metal primitive).
@@ -572,6 +603,27 @@
             encoder.endEncoding()
             commandBuffer.present(drawable)
             commandBuffer.commit()
+        }
+
+        /// Draws the released still over the camera at its remaining opacity, asking for the next
+        /// frame until it is gone so the fade runs even if the camera is slow to deliver.
+        private func drawFadingStill(
+            in encoder: MTLRenderCommandEncoder,
+            uniforms: AspectFillUniforms
+        ) {
+            guard let fading = fadingStill, let fadingStillPipeline else { return }
+            var uniforms = uniforms
+            var opacity = Float(1 - (CACurrentMediaTime() - fading.releasedAt) / Self.stillFadeSeconds)
+            guard opacity > 0 else {
+                fadingStill = nil
+                return
+            }
+            encoder.setRenderPipelineState(fadingStillPipeline)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<AspectFillUniforms>.size, index: 0)
+            encoder.setFragmentTexture(fading.texture, index: 0)
+            encoder.setFragmentBytes(&opacity, length: MemoryLayout<Float>.size, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            markNeedsRedraw()
         }
 
         private func textOverlayGeometry(

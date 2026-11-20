@@ -44,20 +44,13 @@
             let width = Int(wrapWidth)
             let height = Int(fitted.height.rounded(.up))
             guard (1...Self.maximumSide).contains(width), (1...Self.maximumSide).contains(height),
-                let context = Self.bitmapContext(width: width, height: height),
-                let texture = Self.texture(width: width, height: height, device: device)
+                let context = Self.bitmapContext(width: width, height: height)
             else { return nil }
 
             let path = CGPath(rect: CGRect(x: 0, y: 0, width: wrapWidth, height: CGFloat(height)), transform: nil)
             let frame = CTFramesetterCreateFrame(framesetter, CFRange(), path, nil)
             CTFrameDraw(frame, context)
-            guard let pixels = context.data else { return nil }
-            texture.replace(
-                region: MTLRegionMake2D(0, 0, width, height),
-                mipmapLevel: 0,
-                withBytes: pixels,
-                bytesPerRow: context.bytesPerRow
-            )
+            guard let texture = device.makeBGRATexture(copying: context) else { return nil }
             self.key = key
             self.texture = texture
             self.pixelSize = SIMD2(Float(width), Float(height))
@@ -128,7 +121,7 @@
             return NSAttributedString(
                 string: key.text,
                 attributes: [
-                    .font: UIFont.systemFont(ofSize: fontSize, weight: .medium),
+                    .font: UIFont.systemFont(ofSize: fontSize, weight: .bold),
                     NSAttributedString.Key(kCTForegroundColorAttributeName as String): color,
                 ]
             )
@@ -148,22 +141,6 @@
                 space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
                 bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
             )
-        }
-
-        private static func texture(
-            width: Int,
-            height: Int,
-            device: MTLDevice
-        ) -> MTLTexture? {
-            let descriptor = MTLTextureDescriptor.texture2DDescriptor(
-                pixelFormat: .bgra8Unorm,
-                width: width,
-                height: height,
-                mipmapped: false
-            )
-            descriptor.usage = .shaderRead
-            descriptor.storageMode = .shared
-            return device.makeTexture(descriptor: descriptor)
         }
     }
 #endif

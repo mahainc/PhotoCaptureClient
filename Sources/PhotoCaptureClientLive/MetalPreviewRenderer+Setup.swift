@@ -17,6 +17,7 @@
         let histogramOverlay: Histogram.Overlay?
         let channelGainPipeline: MTLComputePipelineState?
         let textPipeline: MTLRenderPipelineState?
+        let fadingStillPipeline: MTLRenderPipelineState?
     }
 
     // MARK: - Metal Setup
@@ -82,7 +83,17 @@
                 .flatMap { try? device.makeComputePipelineState(function: $0) }
 
             // Optional: the preview still runs, without text overlays, if the text pipeline fails to build.
-            let textPipeline = makeTextPipeline(device: device, library: library)
+            let textPipeline = makeBlendedPipeline(
+                vertex: "textVertex",
+                fragment: "textFragment",
+                library: library
+            )
+            // Optional too: without it a released still is replaced by the camera at once.
+            let fadingStillPipeline = makeBlendedPipeline(
+                vertex: "cameraVertex",
+                fragment: "fadingStillFragment",
+                library: library
+            )
 
             return MetalPreviewRenderer(
                 resources: Resources(
@@ -94,19 +105,21 @@
                     boxVertexBuffer: boxVertexBuffer,
                     histogramOverlay: histogramOverlay,
                     channelGainPipeline: channelGainPipeline,
-                    textPipeline: textPipeline
+                    textPipeline: textPipeline,
+                    fadingStillPipeline: fadingStillPipeline
                 )
             )
         }
 
-        /// Premultiplied blending: the text fragment already scales color by coverage and opacity.
-        private static func makeTextPipeline(
-            device: MTLDevice,
+        /// Premultiplied blending: both fragments using it already scale color by their opacity.
+        private static func makeBlendedPipeline(
+            vertex: String,
+            fragment: String,
             library: MTLLibrary
         ) -> MTLRenderPipelineState? {
             let descriptor = MTLRenderPipelineDescriptor()
-            descriptor.vertexFunction = library.makeFunction(name: "textVertex")
-            descriptor.fragmentFunction = library.makeFunction(name: "textFragment")
+            descriptor.vertexFunction = library.makeFunction(name: vertex)
+            descriptor.fragmentFunction = library.makeFunction(name: fragment)
             let attachment = descriptor.colorAttachments[0]
             attachment?.pixelFormat = .bgra8Unorm
             attachment?.isBlendingEnabled = true
@@ -114,7 +127,7 @@
             attachment?.destinationRGBBlendFactor = .oneMinusSourceAlpha
             attachment?.sourceAlphaBlendFactor = .one
             attachment?.destinationAlphaBlendFactor = .oneMinusSourceAlpha
-            return try? device.makeRenderPipelineState(descriptor: descriptor)
+            return try? library.device.makeRenderPipelineState(descriptor: descriptor)
         }
     }
 #endif
