@@ -42,12 +42,16 @@
         private var rasterizedThisFrame = 0
         /// Where the last frame drew each cover, normalized to the texture, for tap hit-testing.
         private var drawnCovers: [(id: UUID, frame: CGRect)] = []
+        /// The last placement, reused while no cover moved, faded or changed its text.
+        private var placement: Placement?
 
         /// Seconds for a cover to close ~63% of the gap to its new position.
         private static let followTimeConstant: Float = 0.07
         private static let fadeSeconds: Float = 0.25
         /// A cover this far from its target (normalized) jumps there instead of sliding across.
         private static let snapDistance: Float = 0.2
+        /// A cover this close to its target (normalized, well under a pixel) lands on it and stops.
+        private static let settleDistance: Float = 0.0005
         /// A stalled frame must not fling covers across the screen when drawing resumes.
         private static let longestStep: CFTimeInterval = 0.1
         /// Core Text work per frame is capped so a page of new translations never stalls a draw.
@@ -168,7 +172,8 @@
             toward target: SIMD4<Float>,
             step: Float
         ) -> SIMD4<Float> {
-            guard simd_distance(frame, target) < snapDistance else { return target }
+            let distance = simd_distance(frame, target)
+            guard distance < snapDistance, distance > settleDistance else { return target }
             return frame + (target - frame) * (1 - exp(-step / followTimeConstant))
         }
 
@@ -177,16 +182,8 @@
             geometry: TextOverlayGeometry,
             backdrop: MTLTexture
         ) {
-            let covers = Self.placedCovers(Array(shown.values), geometry: geometry)
-            drawnCovers = covers.map { ($0.item.id, $0.normalizedFrame(in: geometry.textureSize)) }
-            let vertices = covers.flatMap { Self.vertices(for: $0, geometry: geometry) }
-            guard !vertices.isEmpty,
-                let buffer = device.makeBuffer(
-                    bytes: vertices,
-                    length: vertices.count * MemoryLayout<TextVertex>.stride,
-                    options: .storageModeShared
-                )
-            else { return }
+            guard let placement = currentPlacement(geometry: geometry), let buffer = placement.vertices else { return }
+            let covers = placement.covers
             var uniforms = geometry.uniforms
             encoder.setRenderPipelineState(pipeline)
             encoder.setVertexBuffer(buffer, offset: 0, index: 0)
@@ -200,6 +197,67 @@
                     vertexCount: Self.unitQuad.count
                 )
             }
+        }
+
+        /// Placing covers is quadratic in their count, so it reruns only when its inputs change.
+        private func currentPlacement(geometry: TextOverlayGeometry) -> Placement? {
+            let key = Placement.Key(shown: shown, geometry: geometry)
+            if let placement, placement.key == key {
+                return placement
+            }
+            let covers = Self.placedCovers(Array(shown.values), geometry: geometry)
+            drawnCovers = covers.map { ($0.item.id, $0.normalizedFrame(in: geometry.textureSize)) }
+            let vertices = covers.flatMap { Self.vertices(for: $0, geometry: geometry) }
+            let buffer =
+                vertices.isEmpty
+                ? nil
+                : device.makeBuffer(
+                    bytes: vertices,
+                    length: vertices.count * MemoryLayout<TextVertex>.stride,
+                    options: .storageModeShared
+                )
+            placement = Placement(key: key, covers: covers, vertices: buffer)
+            return placement
+        }
+
+        private struct Placement {
+            struct Key: Equatable {
+                struct Text: Equatable {
+                    let frame: SIMD4<Float>
+                    let angle: Float
+                    let opacity: Float
+                    let sprite: ObjectIdentifier
+                    let background: SIMD4<Float>
+                }
+
+                let geometry: SIMD4<Float>
+                let texts: [UUID: Text]
+
+                init(
+                    shown: [UUID: ShownText],
+                    geometry: TextOverlayGeometry
+                ) {
+                    self.geometry = SIMD4(
+                        geometry.textureSize.x,
+                        geometry.textureSize.y,
+                        geometry.pixelsPerTexel,
+                        geometry.contentScale
+                    )
+                    texts = shown.mapValues { text in
+                        Text(
+                            frame: text.frame,
+                            angle: text.angle,
+                            opacity: text.opacity,
+                            sprite: ObjectIdentifier(text.sprite.texture),
+                            background: text.background
+                        )
+                    }
+                }
+            }
+
+            let key: Key
+            let covers: [PlacedCover]
+            let vertices: MTLBuffer?
         }
 
         /// A cover's place this frame, in texels: it hugs its text and starts at the source box.
